@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<!-- 所有网络请求使用 HTTPS，无需例外。App Store 版本不含内置更新器 -->
+		<key>NSAllowsArbitraryLoads</key>
+		<false/>
+	</dict>
+	<key>NSApplicationSupportsIndirectInputEvents</key>
+	<true/>
+	<key>NSServices</key>
+	<array>
+		<dict/>
+	</array>
+</dict>
+</plist>
