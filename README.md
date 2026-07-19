@@ -10,7 +10,7 @@
 
 ## 📦 安装
 
-最新安装包可以从 [发布页面](https://github.com/anwen/IClick/releases) 下载。
+最新安装包可以从 [发布页面](https://github.com/micolor/IClick/releases) 下载。
 
 > **使用前请在「系统设置 → 隐私与安全性 → 扩展 → Finder 扩展」中启用 IClick 扩展。**
 
@@ -84,16 +84,9 @@
 
 ## 📸 截图
 
-<img src="./截图/b02d5bb5-1f42-4e55-81a3-c5557e9d734f.png" width="40%" style="margin-left:8%"> <img src="./截图/截屏2026-07-18 15.50.52.png" width="40%">
-<img src="./截图/42c8ed16-0e44-4fb6-b2cd-eb1546544d92.png" width="100%"> <img src="./截图/5cc82c72-ff7a-4764-9a3d-95dd8e624f5a.png" width="100%">
-<img src="./截图/8d51e4a1-dd6a-4f42-aecf-e3921073261d.png" width="100%"> <img src="./截图/b44a4a48-2659-4d02-91e8-3ca3379f0a8c.png" width="100%">
-
----
-
-## 类似项目
-
-- [SzContext](https://github.com/RoadToDream/SzContext)
-- [OpenInTerminal](https://github.com/Ji4n1ng/OpenInTerminal)
+<img src="./images/menu-new.png" width="42%" style="margin-left:8%"> <img src="./images/menu-dir.png" width="42%">
+<img src="./images/setting-menu.png" width="100%"> <img src="./images/setting-app.png" width="100%">
+<img src="./images/setting-new.png" width="100%"> <img src="./images/setting-dir.png" width="100%">
 
 ---
 
