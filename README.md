@@ -83,8 +83,8 @@
 ---
 
 ## 📸 截图
-
-<img src="./images/menu-new.png" width="42%" style="margin-left:8%"> <img src="./images/menu-dir.png" width="42%">
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+<img src="./images/menu-new.png" width="42%"> <img src="./images/menu-dir.png" width="42%">
 <img src="./images/setting-menu.png" width="100%"> <img src="./images/setting-app.png" width="100%">
 <img src="./images/setting-new.png" width="100%"> <img src="./images/setting-dir.png" width="100%">
 
