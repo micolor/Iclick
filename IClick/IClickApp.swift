@@ -7,16 +7,18 @@
 import AppKit
 import Foundation
 import SwiftUI
-import SwiftData
 
 import FinderSync
 import os.log
+import UserNotifications
 
 @main
 struct IClickApp: App {
     @NSApplicationDelegateAdaptor private var appDelegate: AppDelegate
 
-    @AppStorage(Key.showMenuBarExtra, store: .group) private var showMenuBarExtra = true
+    // 必须读 App Group：GROUP 里该键为 1（显示菜单栏图标），standard 里为 0。
+    // 改成 standard 会让菜单栏图标消失 —— 这就是之前「UI 变掉了」的真正原因。
+    @AppStorage(Key.showMenuBarExtra, store: UserDefaults.group) private var showMenuBarExtra = true
 
     @AppLog(category: "main")
     private var logger
@@ -34,18 +36,17 @@ struct IClickApp: App {
 
     var body: some Scene {
         SettingsWindow(appState: appState, onAppear: {})
-            .defaultAppStorage(.group)
+            .defaultAppStorage(UserDefaults.group)
             #if !APP_STORE
             .environmentObject(updateManager)
             #endif
-            .modelContainer(SharedDataManager.sharedModelContainer)
 
         // showMenuBarExtra 为 true 时显示菜单条
         MenuBarExtra(
             "Iclick", image: "MenuBar", isInserted: $showMenuBarExtra
         ) {
             MenuBarView()
-        }.defaultAppStorage(.group)
+        }.defaultAppStorage(UserDefaults.group)
     }
 }
 
@@ -55,11 +56,42 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var logger
 
     var appState: AppState = .shared
-    var pluginRunning: Bool = false
     private var isProcessingDelete = false
 
+    /// 最后一次收到扩展心跳的时间。扩展每 3 秒发一次心跳，
+    /// 超过 10 秒没收到即视为扩展已退出 —— 之前这个标志只置 true、从不回退，
+    /// 扩展重启后主应用会一直误以为它还在运行，于是不再重试推送配置。
+    private var lastHeartbeat: Date?
+
+    var pluginRunning: Bool {
+        guard let lastHeartbeat else { return false }
+        return Date().timeIntervalSince(lastHeartbeat) < 10
+    }
+
     let messager = Messager.shared
-    var showInDock = UserDefaults.group.bool(forKey: Key.showInDock)
+    var showInDock = SharedSettings.bool(forKey: Key.showInDock)
+
+    /// 发送用户通知。
+    /// NSUserNotification / NSUserNotificationCenter 自 macOS 11 起废弃，在新系统上投递已不可靠，
+    /// 统一改走 UserNotifications。标题与正文字面量沿用旧实现，用户看到的内容不变。
+    func deliverNotification(title: String, informativeText: String) {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = informativeText
+
+        let request = UNNotificationRequest(
+            identifier: UUID().uuidString,
+            content: content,
+            trigger: nil
+        )
+        // 回调在任意队列，不捕获 self（AppDelegate 是 @MainActor），避免并发隔离问题
+        UNUserNotificationCenter.current().add(request) { error in
+            if let error {
+                Logger(subsystem: subsystem, category: "AppDelegate")
+                    .error("发送通知失败: \(error.localizedDescription)")
+            }
+        }
+    }
 
     func applicationDidFinishLaunching(_ aNotification: Notification) {
         // 在 app 启动后执行的函数
@@ -68,6 +100,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             NSApp.setActivationPolicy(.regular)
         } else {
             NSApp.setActivationPolicy(.accessory)
+        }
+
+        // 通知权限：UserNotifications 必须显式授权，否则投递会被静默丢弃。
+        // 只在启动时请求一次，系统自身会记住用户的决定。
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, error in
+            let log = Logger(subsystem: subsystem, category: "AppDelegate")
+            if let error {
+                log.warning("通知授权请求失败: \(error.localizedDescription)")
+            } else if !granted {
+                log.info("用户未授予通知权限，操作结果将只记录到日志")
+            }
         }
 
         // 首次启动时引导用户启用扩展
@@ -85,7 +128,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             case "common-dirs":
                 self.openCommonDirs(target: payload.target)
             case "heartbeat":
-                self.pluginRunning = true
+                self.lastHeartbeat = Date()
+                // 响应时发送完整配置数据，确保扩展有最新设置
+                self.sendConfigToExtension()
             case "authorize-dir":
                 self.authorizeDir(target: payload.target)
             default:
@@ -187,9 +232,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 self.appState.dirs.append(PermissiveDir(permUrl: url))
                 try? self.appState.savePermissiveDir()
 
-                let observeDirs = self.appState.dirs.map { $0.url.path }
-                self.messager.sendMessage(name: "running", data: MessagePayload(action: "running", target: observeDirs))
-
+                // 主应用无沙盒，始终观察整个文件系统
+                self.messager.sendMessage(name: "running", data: self.buildRunningPayload(target: ["/"]))
                 self.logger.info("已注册目录: \(path)")
                 completion?(true)
             } else {
@@ -198,20 +242,65 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    func sendObserveDirMessage() {
-        let target: [String]
-        if appState.fullDiskAccess {
-            target = ["/"]
-        } else {
-            target = appState.dirs.map { $0.url.path() }
-        }
+    /// 重试计数。只在「开始一次新的推送序列」时复位。
+    /// 不复位的话，上一次把 5 次耗尽之后，后续任何调用都不会再安排重试，
+    /// 扩展先于主应用启动时就会永远收不到配置。
+    private var observeRetryCount = 0
 
-        messager.sendMessage(name: "running", data: MessagePayload(action: "running", target: target))
-        if !pluginRunning {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
-                self.sendObserveDirMessage()
-            }
+    /// 开始观测并推送配置（有限次重试，等待扩展就绪）
+    func sendObserveDirMessage() {
+        observeRetryCount = 0
+        deliverRunningWithRetry()
+    }
+
+    /// 向扩展推送当前配置
+    func sendConfigToExtension() {
+        observeRetryCount = 0
+        if pluginRunning {
+            // 扩展刚回过心跳，一次即达
+            sendRunningMessage()
+        } else {
+            deliverRunningWithRetry()
         }
+    }
+
+    /// 单次「running」消息：主应用无沙盒，始终观察整个文件系统
+    private func sendRunningMessage() {
+        messager.sendMessage(name: "running", data: buildRunningPayload(target: ["/"]))
+    }
+
+    /// 推送配置，未收到心跳时每 3 秒重试，最多 5 次
+    private func deliverRunningWithRetry() {
+        sendRunningMessage()
+
+        // 扩展已回心跳 → 配置已送达，无需继续重试
+        guard !pluginRunning else {
+            observeRetryCount = 0
+            return
+        }
+        guard observeRetryCount < 5 else {
+            logger.warning("配置推送重试已达上限，放弃")
+            return
+        }
+        observeRetryCount += 1
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
+            self?.deliverRunningWithRetry()
+        }
+    }
+
+    /// 构建包含配置数据的 running 消息
+    private func buildRunningPayload(target: [String]) -> MessagePayload {
+        // 序列化 SharedSettings 为 JSON（Data 值转 base64）
+        let allConfig = SharedSettings.exportAllForIPC()
+        let configJSON: String?
+        if let jsonData = try? JSONSerialization.data(withJSONObject: allConfig, options: .fragmentsAllowed),
+           let jsonStr = String(data: jsonData, encoding: .utf8) {
+            configJSON = jsonStr
+        } else {
+            logger.warning("Failed to serialize config for IPC")
+            configJSON = nil
+        }
+        return MessagePayload(action: "running", target: target, configJSON: configJSON)
     }
 
     func actionHandler(rid: String, target: [String], trigger: String) {
@@ -398,7 +487,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         logger.info("---- cutToPasteboard  target:\(target)")
         // 解码路径后存储，确保与授权目录路径格式一致
         let decodedTargets = target.map { $0.removingPercentEncoding ?? $0 }
-        UserDefaults.group.set(decodedTargets, forKey: Key.actions + ".cut-files")
+        SharedSettings.set(decodedTargets, forKey: Key.actions + ".cut-files")
         // 同时写入选贴板：文件 URL（Finder 可识别） + 路径文本
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
@@ -409,10 +498,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         pasteboard.setString(paths, forType: .string)
 
         // 显示通知
-        let notification = NSUserNotification()
-        notification.title = "已剪切 \(target.count) 项"
-        notification.informativeText = "在目标 Finder 窗口按 ⌘⌥V 粘贴，或使用右键菜单「粘贴」"
-        NSUserNotificationCenter.default.deliver(notification)
+        deliverNotification(
+            title: "已剪切 \(target.count) 项",
+            informativeText: "在目标 Finder 窗口按 ⌘⌥V 粘贴，或使用右键菜单「粘贴」"
+        )
     }
 
     /// 从系统剪贴板读取文件 URL 列表（来自 Finder Cmd+C 复制）
@@ -450,7 +539,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         var filesToOperate: [String] = []
         var isCutOperation = false
 
-        if let cutFiles = UserDefaults.group.stringArray(forKey: Key.actions + ".cut-files"),
+        if let cutFiles = SharedSettings.stringArray(forKey: Key.actions + ".cut-files"),
            !cutFiles.isEmpty {
             filesToOperate = cutFiles.map { $0.removingPercentEncoding ?? $0 }
             isCutOperation = true
@@ -524,20 +613,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // 清理 IClick 自定义剪切存储
         if isCutOperation {
-            UserDefaults.group.removeObject(forKey: Key.actions + ".cut-files")
+            SharedSettings.removeObject(forKey: Key.actions + ".cut-files")
         }
 
-        let notification = NSUserNotification()
         if failCount == 0 {
-            notification.title = isCutOperation ? "粘贴完成" : "复制完成"
-            notification.informativeText = isCutOperation
-                ? "已移动 \(successCount) 项到目标目录"
-                : "已复制 \(successCount) 项到目标目录"
+            deliverNotification(
+                title: isCutOperation ? "粘贴完成" : "复制完成",
+                informativeText: isCutOperation
+                    ? "已移动 \(successCount) 项到目标目录"
+                    : "已复制 \(successCount) 项到目标目录"
+            )
         } else {
-            notification.title = isCutOperation ? "粘贴完成（部分失败）" : "复制完成（部分失败）"
-            notification.informativeText = "成功 \(successCount) 项，失败 \(failCount) 项"
+            deliverNotification(
+                title: isCutOperation ? "粘贴完成（部分失败）" : "复制完成（部分失败）",
+                informativeText: "成功 \(successCount) 项，失败 \(failCount) 项"
+            )
         }
-        NSUserNotificationCenter.default.deliver(notification)
     }
 
 
@@ -561,6 +652,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        var failedItems: [String] = []
+
         for item in target {
             let decodedPath = item.removingPercentEncoding ?? item
 
@@ -575,17 +668,32 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 continue
             }
 
-            // 1. 直接 FileManager 删除（无沙盒限制）
-            if (try? FileManager.default.removeItem(atPath: decodedPath)) != nil {
-                logger.info("删除成功: \(decodedPath)")
+            // 1. 移入废纸篓（可恢复），不再用 removeItem 做不可逆的永久删除
+            do {
+                try FileManager.default.trashItem(at: URL(fileURLWithPath: decodedPath), resultingItemURL: nil)
+                logger.info("已移入废纸篓: \(decodedPath)")
                 continue
+            } catch {
+                logger.warning("移入废纸篓失败，回退 Finder: \(decodedPath), error: \(error.localizedDescription)")
             }
 
-            // 2. 通过 AppleScript 让 Finder 删除（备用）
+            // 2. 通过 AppleScript 让 Finder 删除（同样进废纸篓）
             if deleteViaFinder(path: decodedPath) {
                 logger.info("通过 Finder 删除成功: \(decodedPath)")
                 continue
             }
+
+            failedItems.append(decodedPath)
+        }
+
+        // 3. 两条路径都失败时明确告知用户，不再静默失败
+        if !failedItems.isEmpty {
+            let alert = NSAlert()
+            alert.messageText = "删除失败"
+            alert.informativeText = "以下项目无法删除：\n" + failedItems.joined(separator: "\n")
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "确定")
+            alert.runModal()
         }
     }
 
@@ -601,12 +709,31 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// 在指定目录中创建文件
     private func doCreateFile(in dirURL: URL, rcitem: NewFile, ext: String) -> Bool {
-        let fileName = "\(rcitem.defaultName)\(ext)"
+        // 名称/后缀都来自可编辑的模板配置，必须清洗掉路径分隔符。
+        // 否则 defaultName 为 "a/b" 时会写到子目录，".." 时会写到目标目录之外。
+        let cleanedName = rcitem.defaultName
+            .replacingOccurrences(of: "/", with: "-")
+            .replacingOccurrences(of: ":", with: "-")
+        let baseName = (cleanedName.isEmpty || cleanedName.allSatisfy { $0 == "." }) ? "未命名" : cleanedName
+
+        let rawExt = ext.hasPrefix(".") || ext.isEmpty ? ext : ".\(ext)"
+        let safeExt = rawExt
+            .replacingOccurrences(of: "/", with: "")
+            .replacingOccurrences(of: ":", with: "")
+
+        let fileName = "\(baseName)\(safeExt)"
         var fileURL = dirURL.appendingPathComponent(fileName)
         var counter = 1
         while FileManager.default.fileExists(atPath: fileURL.path) {
-            fileURL = dirURL.appendingPathComponent("\(rcitem.defaultName)\(counter)\(ext)")
+            fileURL = dirURL.appendingPathComponent("\(baseName)\(counter)\(safeExt)")
             counter += 1
+        }
+
+        // 兜底校验：最终路径必须仍在目标目录内
+        let dirPrefix = dirURL.standardizedFileURL.path + "/"
+        guard fileURL.standardizedFileURL.path.hasPrefix(dirPrefix) else {
+            logger.error("拒绝在目标目录之外创建文件: \(fileURL.path)")
+            return false
         }
 
         do {
@@ -740,10 +867,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // 主检测：FIFinderSyncController 系统 API
         if FIFinderSyncController.isExtensionEnabled { return true }
 
-        // 辅助检测：通过 pluginkit 查询系统扩展状态
+        // 辅助检测：通过 pluginkit 查询扩展状态（先按协议，再按 bundle ID）
+        let extBundleID = "cn.anwen.IClick.FinderSyncExt"
+
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/bin/pluginkit")
-        task.arguments = ["-m", "-p", "com.apple.FinderSync"]
+        task.arguments = ["-m", "-v", "-i", extBundleID]
         let pipe = Pipe()
         task.standardOutput = pipe
         do {
@@ -751,9 +880,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             task.waitUntilExit()
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             let output = String(data: data, encoding: .utf8) ?? ""
-            // 检查是否包含 +（已启用）且扩展 bundle ID 匹配
-            let extBundleID = "cn.anwen.IClick.FinderSyncExt"
-            return output.contains("+") && output.contains(extBundleID)
+            // 检查是否包含 +（已启用）
+            return output.contains("+")
         } catch {
             // 归档打包后，沙盒/Hardened Runtime 会限制 Process 执行系统工具
             // Process 执行失败 ≠ 扩展未启用，应乐观假设已启用以避免误报

@@ -14,10 +14,12 @@ struct MessagePayload: Codable {
     var target: [String] = []
     var rid: String = ""
     // ctx-items ctx-container ctx-sidebar toolbar
-    var trigger: String = "" // 改为可选类型，避免解码失败
+    var trigger: String = ""
+    /// 配置同步：主应用序列化所有设置数据为 JSON 字符串
+    var configJSON: String?
 
     public var description: String {
-        return "MessagePayload(action: \(action), target: \(target), rid:\(rid), trigger: \(trigger))"
+        return "MessagePayload(action: \(action), target: \(target), rid:\(rid), trigger: \(trigger), hasConfig: \(configJSON != nil))"
     }
 }
 

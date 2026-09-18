@@ -3,11 +3,20 @@ import Foundation
 import UniformTypeIdentifiers
 
 public class Utils {
+    /// 判断路径本身是否是受保护目录（只看自身，不匹配其子项）
     public static func isProtectedFolder(_ path: String) -> Bool {
-        let normalizedPath = path.hasSuffix("/") ? path : path + "/"
-        // 只检查路径本身是否是受保护目录，而不是检查是否在受保护目录下
+        // 先规范化：展开 ~、折叠 . 与 .. 与重复斜杠，避免 "/System/../System" 这类写法绕过
+        let expanded = (path as NSString).expandingTildeInPath
+        var normalized = (expanded as NSString).standardizingPath
+        while normalized.count > 1 && normalized.hasSuffix("/") { normalized.removeLast() }
+        // 空路径无从判断，按危险处理
+        if normalized.isEmpty { return true }
+
         return Constants.protectedDirs.contains { protectedDir in
-            normalizedPath == protectedDir || normalizedPath == protectedDir + "/"
+            var dir = protectedDir
+            while dir.count > 1 && dir.hasSuffix("/") { dir.removeLast() }
+            // 大小写不敏感：APFS 默认大小写不敏感，/system 与 /System 是同一个目录
+            return normalized.compare(dir, options: .caseInsensitive) == .orderedSame
         }
     }
 

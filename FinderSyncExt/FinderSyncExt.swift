@@ -19,6 +19,14 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "IClick",
 class FinderSyncExt: FIFinderSync, @unchecked Sendable {
     var myFolderURL = URL(fileURLWithPath: "/Users/")
     var isHostAppOpen = false
+    /// 主应用 bundle id（用于在扩展内按需拉起）
+    private let hostBundleID = "cn.anwen.IClick"
+    /// 上一轮心跳是否尚未收到主应用响应（用于存活检测）
+    private var heartbeatResponsePending = false
+    /// 连续未响应的次数：单次丢包不代表主应用已退出
+    private var heartbeatMissCount = 0
+    private var heartbeatTimer: Timer?
+
     lazy var appState: AppState = {
         MainActor.assumeIsolated { AppState(inExt: true) }
     }()
@@ -27,10 +35,15 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
 
     var triggerManKind = FIMenuKind.contextualMenuForContainer
 
-    // 菜单缓存：按 menuKind 区分，避免不同触发类型的菜单混淆
-    private var cachedMenus: [FIMenuKind: NSMenu] = [:]
-    // 每个 menuKind 对应的数据版本号
-    private var cachedDataVersions: [FIMenuKind: Int] = [:]
+    // macOS 15 上 selectedItemURLs/targetedURL 在点击时可能返回 nil
+    // 在菜单构建时缓存，供 action 点击时使用
+    private var cachedSelectedURLs: [URL]?
+    private var cachedTargetURL: URL?
+
+    // 菜单缓存：键包含 menuKind、配置版本与当前选中数量（见 menuCacheKey）
+    private var cachedMenus: [String: NSMenu] = [:]
+    // 每个缓存键对应的数据版本号
+    private var cachedDataVersions: [String: Int] = [:]
 
     // 文件图标缓存（按路径）
     private var iconCache: [String: NSImage] = [:]
@@ -59,17 +72,36 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
         messager.on(name: "running") { [weak self] payload in
             guard let self else { return }
 
-            self.isHostAppOpen = true
+            // 接收主应用推送的配置数据
+            if let configJSON = payload.configJSON, !configJSON.isEmpty {
+                if let jsonData = configJSON.data(using: .utf8),
+                   let dict = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
+                    SharedSettings.receiveRemote(dict)
+                }
+            }
 
+            self.isHostAppOpen = true
+            self.heartbeatResponsePending = false
+            self.heartbeatMissCount = 0
+
+            // 心跳每 3 秒会重复推送同一份 target，值没变就别再赋值：
+            // 反复设置 directoryURLs 会让 Finder 重新评估监控范围
             if payload.target.count > 0 {
-                FIFinderSyncController.default().directoryURLs = Set(payload.target.map { URL(fileURLWithPath: $0) })
+                let newDirs = Set(payload.target.map { URL(fileURLWithPath: $0) })
+                if FIFinderSyncController.default().directoryURLs != newDirs {
+                    FIFinderSyncController.default().directoryURLs = newDirs
+                }
             }
             Task { @MainActor [weak self] in
                 guard let self else { return }
+                // 仅当配置版本变化时才刷新菜单；周期心跳会重复推送相同配置，
+                // 若每次都 invalidateMenuStructure 会导致右键菜单频繁重建。
+                let oldVersion = self.currentDataVersion()
                 self.refreshDataVersion()
-                self.appState.refresh()
-                self.invalidateMenuStructure()  // 配置更新时仅清除菜单结构，保留图标缓存
-                self.heartBeat()
+                if self.currentDataVersion() != oldVersion {
+                    self.appState.refresh()
+                    self.invalidateMenuStructure()
+                }
             }
         }
 
@@ -81,8 +113,72 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
             object: nil
         )
 
-        // 先尝试加载主应用状态，乐观假设已运行
-        messager.sendMessage(name: Key.messageFromFinder, data: MessagePayload(action: "heartbeat", target: [], rid: ""))
+        // 向主应用发送心跳请求配置，重试直到收到响应
+        requestConfigFromApp(retry: 0)
+
+        // 周期心跳：持续检测主应用存活，主应用崩溃/退出后能自动恢复
+        DispatchQueue.main.async { [weak self] in
+            self?.startHeartbeat()
+        }
+    }
+
+    /// 周期心跳（每 3 秒）。若上一轮心跳未收到响应，则判定主应用未运行。
+    /// 这样即使主应用异常退出（未收到 quit），点击时也能按需重新拉起。
+    private func startHeartbeat() {
+        heartbeatTimer?.invalidate()
+        heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            if self.heartbeatResponsePending {
+                // 连续两次未响应（约 6 秒）才判定主应用未运行。
+                // 单次丢包（主应用正忙 / DNC 抖动）就置 false 会误报，导致点击时多余地拉起主应用。
+                self.heartbeatMissCount += 1
+                if self.heartbeatMissCount >= 2 {
+                    self.isHostAppOpen = false
+                }
+            } else {
+                self.heartbeatMissCount = 0
+            }
+            self.heartbeatResponsePending = true
+            self.messager.sendMessage(name: Key.messageFromFinder, data: MessagePayload(action: "heartbeat", target: [], rid: ""))
+        }
+    }
+
+    /// 发送消息到主应用；若主应用不在运行，先拉起再等就绪后重发。
+    /// DNC 消息是"发出即忘"的，主应用未注册观察者时消息会丢失，因此必须等它就绪。
+    private func sendMessageToHost(_ payload: MessagePayload) {
+        if isHostAppOpen {
+            messager.sendMessage(name: Key.messageFromFinder, data: payload)
+            return
+        }
+        logger.warning("主应用未运行，尝试拉起并重发消息: \(payload.action)")
+        launchHostApp()
+        func retry(attempt: Int) {
+            // 最多等待约 6 秒（20 * 0.3s）
+            if attempt > 20 {
+                logger.warning("等待主应用就绪超时，仍发送一次（可能丢失）: \(payload.action)")
+                messager.sendMessage(name: Key.messageFromFinder, data: payload)
+                return
+            }
+            if isHostAppOpen {
+                messager.sendMessage(name: Key.messageFromFinder, data: payload)
+            } else {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { retry(attempt: attempt + 1) }
+            }
+        }
+        retry(attempt: 0)
+    }
+
+    /// 通过 bundle id 拉起主应用
+    private func launchHostApp() {
+        guard let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: hostBundleID) else {
+            logger.warning("无法定位主应用 \(self.hostBundleID)")
+            return
+        }
+        NSWorkspace.shared.openApplication(at: appURL, configuration: NSWorkspace.OpenConfiguration()) { _, error in
+            if let error {
+                logger.error("拉起主应用失败: \(error.localizedDescription)")
+            }
+        }
     }
 
     func heartBeat() {
@@ -90,7 +186,23 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
         messager.sendMessage(name: Key.messageFromFinder, data: MessagePayload(action: "heartbeat", target: [], rid: ""))
     }
 
-    // 使所有缓存失效（菜单结构 + 图标），仅在扩展启动时使用
+    /// 向主应用请求配置，失败时重试（最多 10 次，每次间隔 2 秒）
+    private func requestConfigFromApp(retry: Int) {
+        guard retry < 10 else {
+            logger.warning("配置请求重试已达上限，放弃")
+            return
+        }
+        heartBeat()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            guard let self else { return }
+            // 如果尚未收到配置，继续重试
+            if SharedSettings.remotePayload == nil {
+                self.requestConfigFromApp(retry: retry + 1)
+            }
+        }
+    }
+
+    // 使所有缓存失效（菜单结构 + 图标 + 选中文件），仅在扩展启动时使用
     func invalidateMenuCache() {
         cachedMenus.removeAll()
         cachedDataVersions.removeAll()
@@ -99,6 +211,8 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
         nextTag = 1
         sfSymbolCache.removeAll()
         iconCache.removeAll()
+        cachedSelectedURLs = nil
+        cachedTargetURL = nil
     }
 
     /// 仅使菜单结构缓存失效，保留图标缓存（配置变更时使用，图标不会随配置变化）
@@ -109,14 +223,10 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
     }
 
     /// 主应用配置变更时刷新数据并使菜单缓存失效（下次右键时懒构建，避免阻塞主 actor 触发看门狗）
-    @objc func handleConfigChanged() {
-        logger.info("收到配置变更通知，刷新数据并清除菜单缓存")
-        refreshDataVersion()
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            self.appState.refresh()
-            self.invalidateMenuStructure()
-        }
+    @objc dynamic func handleConfigChanged() {
+        logger.info("收到配置变更通知，请求主应用推送最新配置")
+        // 发送 heartbeat 触发主应用推送完整配置
+        messager.sendMessage(name: Key.messageFromFinder, data: MessagePayload(action: "heartbeat", target: [], rid: ""))
     }
 
     // 内存缓存的配置版本号，避免每次右键都读 UserDefaults（热路径）
@@ -127,7 +237,7 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
 
     /// 从 UserDefaults 刷新配置版本号缓存
     private func refreshDataVersion() {
-        cachedDataVersion = UserDefaults.group.integer(forKey: Key.configVersion)
+        cachedDataVersion = SharedSettings.integer(forKey: Key.configVersion)
     }
 
     // MARK: - Primary Finder Sync protocol methods
@@ -172,11 +282,15 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
             return DispatchQueue.main.sync { self.menu(for: menuKind) }
         }
         triggerManKind = menuKind
-        NSLog("[IClick] menu(for:) 被调用, menuKind=\(String(describing: menuKind)), triggerManKind=\(String(describing: triggerManKind))")
+        // 缓存当前选中的文件 URL（macOS 15 上点击时 selectedItemURLs 可能返回 nil）
+        cachedSelectedURLs = FIFinderSyncController.default().selectedItemURLs()
+        cachedTargetURL = FIFinderSyncController.default().targetedURL()
+        NSLog("[IClick] menu(for:) 被调用, menuKind=\(String(describing: menuKind)), triggerManKind=\(String(describing: triggerManKind)), cachedSelected=\(cachedSelectedURLs?.count ?? 0), cachedTarget=\(cachedTargetURL?.path ?? "nil")")
 
         let dataVersion = currentDataVersion()
-        if let cached = cachedMenus[menuKind],
-           let cachedVersion = cachedDataVersions[menuKind],
+        let cacheKey = menuCacheKey(menuKind, version: dataVersion)
+        if let cached = cachedMenus[cacheKey],
+           let cachedVersion = cachedDataVersions[cacheKey],
            cachedVersion == dataVersion {
             NSLog("[IClick] 缓存命中, menuKind=\(String(describing: menuKind)), version=\(dataVersion), tagToId.count=\(tagToId.count)")
             return cached
@@ -196,10 +310,17 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
             logger.warning("not have menuKind ")
         }
 
-        cachedMenus[menuKind] = applicationMenu
-        cachedDataVersions[menuKind] = dataVersion
+        cachedMenus[cacheKey] = applicationMenu
+        cachedDataVersions[cacheKey] = dataVersion
 
         return applicationMenu
+    }
+
+    /// 菜单缓存键：菜单内容不仅取决于 menuKind 和配置版本，还取决于当前选中项数量
+    /// （requireSelection 的菜单项只在选中文件时出现）。
+    /// 只按 (menuKind, version) 做键时，先在空白处右键、再选中文件右键会命中错误的缓存。
+    private func menuCacheKey(_ menuKind: FIMenuKind, version: Int) -> String {
+        "\(menuKind.rawValue)-\(version)-\(cachedSelectedURLs?.count ?? 0)"
     }
 
     @MainActor @objc func createMenuForToolbar(_ applicationMenu: NSMenu, menuKind: FIMenuKind) {
@@ -252,6 +373,8 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
         var mainMenuItems: [NSMenuItem] = []
         var submenuApps: [OpenWithApp] = []
 
+        // 这里原本每次构建菜单都会把每个 app 打成 error 日志，
+        // 右键一次就是 O(n) 次字符串拼接 —— 扩展内存/性能都紧张，去掉逐项诊断即可
         for item in appState.apps where item.enabled {
             if item.showInMainMenu {
                 let menuItem = NSMenuItem()
@@ -271,8 +394,10 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
         let submenuItem: NSMenuItem?
         if !submenuApps.isEmpty {
             let submenuMenuItem = NSMenuItem()
-            submenuMenuItem.title = String(localized: "Favorite Apps")
-            if let tinted = tintedSymbol(named: "app.badge", color: .systemPurple, size: 16) {
+            submenuMenuItem.title = submenuTitle("submenuApps", fallback: String(localized: "Favorite Apps"))
+            if let custom = submenuCustomIcon("submenuApps") {
+                submenuMenuItem.image = custom
+            } else if let tinted = tintedSymbol(named: "app.badge", color: .systemPurple, size: 16) {
                 submenuMenuItem.image = tinted
             } else {
                 submenuMenuItem.image = sfIcon("app", description: "Favorite Apps")
@@ -324,6 +449,27 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
         // 统一回退：系统文件图标 → 缩放至菜单尺寸
         let fallback = getIcon(for: item.url.path)
         return menuSizedImage(fallback) ?? fallback
+    }
+
+    /// 子菜单显示名称：优先用设置里自定义的名字，未自定义时用内置本地化名称。
+    /// 主应用推送的配置里包含 submenu_name_* 键。
+    private func submenuTitle(_ id: String, fallback: String) -> String {
+        if let custom = SharedSettings.string(forKey: "submenu_name_\(id)"), !custom.isEmpty {
+            return custom
+        }
+        return fallback
+    }
+
+    /// 子菜单自定义图标：支持自定义图片路径与 SF Symbol。
+    /// 返回 nil 表示用户未自定义，调用方继续使用内置的着色图标。
+    private func submenuCustomIcon(_ id: String) -> NSImage? {
+        guard let icon = SharedSettings.string(forKey: "submenu_icon_\(id)"), !icon.isEmpty else {
+            return nil
+        }
+        if icon.contains("/") {
+            return menuSizedImage(NSImage(contentsOfFile: icon))
+        }
+        return sfIcon(icon, description: id)
     }
 
     // 创建 SF Symbol 图标（非模板模式，显示原生彩色），大小为 16pt 匹配菜单图标标准尺寸
@@ -444,13 +590,15 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
         logger.info("开始创建常用路径菜单项")
 
         let menuItem = NSMenuItem()
-        menuItem.title = String(localized: "Favorite Folders")
-        // 与设置保持一致：使用 folder 图标 + 绿色着色
-        if let tinted = tintedSymbol(named: "folder", color: .systemGreen, size: 16) {
+        menuItem.title = submenuTitle("commonDirs", fallback: String(localized: "Favorite Folders"))
+        // 与设置保持一致：默认使用 folder 图标 + 绿色着色；用户自定义了图标则优先用自定义的
+        if let custom = submenuCustomIcon("commonDirs") {
+            menuItem.image = custom
+        } else if let tinted = tintedSymbol(named: "folder", color: .systemGreen, size: 16) {
             menuItem.image = tinted
         } else {
             menuItem.image = sfIcon("folder", description: "Favorite Folders")
-                ?? menuSizedImage(NSWorkspace.shared.icon(forFileType: "public.folder"))
+                ?? menuSizedImage(NSWorkspace.shared.icon(for: .folder))
         }
         let submenu = NSMenu(title: "Favorite Folders submenu")
 
@@ -486,7 +634,7 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
         let tag = menuItem.tag
         guard let path = tagToPath[tag] else { return }
         let rid = tagToId[tag] ?? ""
-        messager.sendMessage(name: Key.messageFromFinder, data: MessagePayload(action: "common-dirs", target: [path], rid: rid))
+        sendMessageToHost(MessagePayload(action: "common-dirs", target: [path], rid: rid))
     }
 
     @MainActor @objc func createFileCreateMenuItem() -> NSMenuItem? {
@@ -499,12 +647,14 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
             return nil
         }
         let menuItem = NSMenuItem()
-        menuItem.title = String(localized: "New File")
-        // 与设置保持一致：使用 doc.badge.plus 图标 + 蓝色着色
-        if let tinted = tintedSymbol(named: "doc.badge.plus", color: .systemBlue, size: 16) {
+        menuItem.title = submenuTitle("newFiles", fallback: String(localized: "New File"))
+        // 与设置保持一致：默认 doc.badge.plus + 蓝色着色；用户自定义了图标则优先用自定义的
+        if let custom = submenuCustomIcon("newFiles") {
+            menuItem.image = custom
+        } else if let tinted = tintedSymbol(named: "doc.badge.plus", color: .systemBlue, size: 16) {
             menuItem.image = tinted
         } else {
-            menuItem.image = menuSizedImage(NSWorkspace.shared.icon(forFileType: "public.plain-text"))
+            menuItem.image = menuSizedImage(NSWorkspace.shared.icon(for: .plainText))
         }
         let submenu = NSMenu(title: "file create menu")
         for item in enabledFiletypeItems {
@@ -517,6 +667,9 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
             nextTag += 1
 
             if let app = item.openApp {
+                // 注意：getIcon 返回缓存里的同一个实例，这里改 isTemplate 会永久污染缓存，
+                // 使子菜单里同一个 App 的图标也变成单色模板。这是 HEAD 的既有行为，按用户
+                // 「不要改变 UI」的要求原样保留，不要在这里加 copy()。
                 let icon = getIcon(for: app.path)
                 icon.isTemplate = true
                 menuItem.image = menuSizedImage(icon)
@@ -544,26 +697,34 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
         return menuItem
     }
 
-    @objc func createFile(_ menuItem: NSMenuItem) {
+    @objc dynamic func createFile(_ menuItem: NSMenuItem) {
         guard let rid = tagToId[menuItem.tag] else { return }
-        guard let target = FIFinderSyncController.default().targetedURL()?.path() else { return }
-        messager.sendMessage(name: Key.messageFromFinder, data: MessagePayload(action: "Create File", target: [target], rid: rid))
+        // macOS 15 上 targetedURL 在点击时可能返回 nil，使用菜单构建时缓存的值
+        guard let target = (FIFinderSyncController.default().targetedURL() ?? cachedTargetURL)?.path() else { return }
+        sendMessageToHost(MessagePayload(action: "Create File", target: [target], rid: rid))
     }
 
-    @objc func actioning(_ menuItem: NSMenuItem) {
-        guard let rid = tagToId[menuItem.tag] else { return }
+    @objc dynamic func actioning(_ menuItem: NSMenuItem) {
+        guard let rid = tagToId[menuItem.tag] else {
+            logger.warning("actioning: tag \(menuItem.tag) 无对应 rid，菜单可能已过期")
+            return
+        }
 
         // 常用路径已迁移到 openCommonDir，此处保留兼容
         if rid.hasPrefix("common-dir:") {
             let path = rid.replacingOccurrences(of: "common-dir:", with: "")
-            messager.sendMessage(name: Key.messageFromFinder, data: MessagePayload(action: "common-dirs", target: [path], rid: rid))
+            sendMessageToHost(MessagePayload(action: "common-dirs", target: [path], rid: rid))
             return
         }
 
         let target = getTargets()
-        if target.isEmpty { return }
+        if target.isEmpty {
+            logger.warning("actioning: rid=\(rid) getTargets 为空，跳过")
+            return
+        }
         let trigger = getTriggerKind(triggerManKind)
-        messager.sendMessage(name: Key.messageFromFinder, data: MessagePayload(action: "actioning", target: target, rid: rid, trigger: trigger))
+        logger.info("actioning: rid=\(rid), trigger=\(trigger), target=\(target)")
+        sendMessageToHost(MessagePayload(action: "actioning", target: target, rid: rid, trigger: trigger))
     }
 
     func getTargets() -> [String] {
@@ -571,28 +732,35 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
 
         switch triggerManKind {
         case FIMenuKind.contextualMenuForItems:
-            if let urls = FIFinderSyncController.default().selectedItemURLs() {
+            // macOS 15 上 selectedItemURLs 在点击时可能返回 nil，使用菜单构建时缓存的值
+            if let urls = FIFinderSyncController.default().selectedItemURLs() ?? cachedSelectedURLs {
                 for url in urls {
                     target.append(url.path())
                 }
             } else {
                 logger.warning("not have selected dirs")
             }
+            if target.isEmpty {
+                if let targetURL = FIFinderSyncController.default().targetedURL() ?? cachedTargetURL {
+                    target.append(targetURL.path())
+                    logger.info("getTargets: selectedItemURLs 为空，降级到 targetedURL: \(targetURL.path)")
+                }
+            }
 
         case FIMenuKind.toolbarItemMenu:
-            if let urls = FIFinderSyncController.default().selectedItemURLs() {
+            if let urls = FIFinderSyncController.default().selectedItemURLs() ?? cachedSelectedURLs {
                 for url in urls {
                     target.append(url.path())
                 }
             }
             if target.isEmpty {
-                if let targetURL = FIFinderSyncController.default().targetedURL() {
+                if let targetURL = FIFinderSyncController.default().targetedURL() ?? cachedTargetURL {
                     target.append(targetURL.path())
                 }
             }
 
         default:
-            if let targetURL = FIFinderSyncController.default().targetedURL() {
+            if let targetURL = FIFinderSyncController.default().targetedURL() ?? cachedTargetURL {
                 target.append(targetURL.path())
             }
         }
@@ -600,12 +768,18 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
         return target
     }
 
-    @objc func appOpen(_ menuItem: NSMenuItem) {
-        guard let rid = tagToId[menuItem.tag] else { return }
-        let target: [String] = getTargets()
-        if !target.isEmpty {
-            messager.sendMessage(name: Key.messageFromFinder, data: MessagePayload(action: "open", target: target, rid: rid))
+    @objc dynamic func appOpen(_ menuItem: NSMenuItem) {
+        guard let rid = tagToId[menuItem.tag] else {
+            logger.warning("appOpen: tag \(menuItem.tag) 无对应 rid")
+            return
         }
+        let target: [String] = getTargets()
+        if target.isEmpty {
+            logger.warning("appOpen: rid=\(rid) getTargets 为空，跳过")
+            return
+        }
+        logger.info("appOpen: rid=\(rid), target=\(target)")
+        sendMessageToHost(MessagePayload(action: "open", target: target, rid: rid))
     }
 
     @objc func getTriggerKind(_ kind: FIMenuKind) -> String {

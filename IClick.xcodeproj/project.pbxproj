@@ -55,7 +55,6 @@
 		5CDFE3182CA3D66B00AE6C95 /* Constants.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CDFE3172CA3D66000AE6C95 /* Constants.swift */; };
 		5CDFE3192CA3D66B00AE6C95 /* Constants.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CDFE3172CA3D66000AE6C95 /* Constants.swift */; };
 		5CFA85742D1477AD0063A6A1 /* LaunchAtLogin.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CFA85732D1477AD0063A6A1 /* LaunchAtLogin.swift */; };
-		89B94E7AC221447CA4F947A2 /* AnnotationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E78368D95DF4BE4993042B3 /* AnnotationView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -124,7 +123,6 @@
 		5CDFE3152CA3D63B00AE6C95 /* SettingsWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsWindow.swift; sourceTree = "<group>"; };
 		5CDFE3172CA3D66000AE6C95 /* Constants.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Constants.swift; sourceTree = "<group>"; };
 		5CFA85732D1477AD0063A6A1 /* LaunchAtLogin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LaunchAtLogin.swift; sourceTree = "<group>"; };
-	9E78368D95DF4BE4993042B3 /* AnnotationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnnotationView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -224,7 +222,6 @@
 				5C4288652BDA5536000C0828 /* AppLogger.swift */,
 				5C68BFE02C6651B80011C096 /* Extension+.swift */,
 				5CFA85732D1477AD0063A6A1 /* LaunchAtLogin.swift */,
-				9E78368D95DF4BE4993042B3 /* AnnotationView.swift */,
 			);
 			path = Shared;
 			sourceTree = "<group>";
@@ -403,7 +400,6 @@
 				5C4039F52E8F717A00AE4091 /* ModelContainer.swift in Sources */,
 				5C34BAA52D943AF100CF8128 /* Utils.swift in Sources */,
 				5CDFE3192CA3D66B00AE6C95 /* Constants.swift in Sources */,
-				89B94E7AC221447CA4F947A2 /* AnnotationView.swift in Sources */,
 			);
 		};
 		5C119D2C2BBEA9AC00B2D7C4 /* Sources */ = {

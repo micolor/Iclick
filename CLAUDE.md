@@ -10,7 +10,7 @@ IClick is a macOS desktop application that extends Finder's context menu with cu
 - Swift 6.2+ (required)
 - SwiftUI (all UI components)
 - AppKit (system integration only, no UI)
-- SwiftData (persistence)
+- plist-backed `SharedSettings` (persistence — see `IClick/Shared/StringExtension.swift`)
 - FinderSync framework (Finder extension)
 - DistributedNotificationCenter (inter-process communication)
 - Xcode 16+ (required for development)
@@ -42,18 +42,19 @@ The main app and extension communicate via `DistributedNotificationCenter`:
 ### 4. State Management
 - **AppState**: Centralized `ObservableObject` managing all app state
   - Apps: External applications that can open files
-  - Dirs: Permissive directories (with security bookmarks)
+  - Dirs: Permissive directories (no security bookmarks — the app is non-sandboxed)
   - Actions: Custom context menu actions
   - NewFiles: File templates for creation
   - CommonDirs: Quick access folders
-- Persistence: SwiftData with shared container between app and extension
+- Persistence: a single plist at `~/Library/Application Support/IClick/SharedSettings.plist`,
+  read/written through `SharedSettings`. There is no App Group and no SwiftData layer.
 - Location: [AppState.swift](IClick/AppState.swift)
 
 ### 5. Data Models
 All models are in [IClick/Model/](IClick/Model/):
-- `Models.swift`: SwiftData `@Model` definitions (PermDir, OpenWithApp, RCAction, NewFile, CommonDir)
-- `RCBase.swift`: Base protocol for common functionality
-- `ModelContainer.swift`: Shared SwiftData container configuration
+- `RCBase.swift`: The `RCBase` protocol plus `OpenWithApp`, `PermissiveDir`, `NewFile`, `CommonDir`, `RCAction`
+- `Models.swift` / `ModelContainer.swift`: empty placeholders — the SwiftData layer was removed
+  (nothing ever queried it, and container creation failure was a `fatalError` on the launch path)
 
 ## Build and Development Commands
 
@@ -88,14 +89,14 @@ swiftlint
 
 ### Adding New Context Menu Actions
 
-1. Define action model in [Models.swift](IClick/Model/Models.swift)
+1. Define/update the action in [RCBase.swift](IClick/Model/RCBase.swift) (`RCAction`)
 2. Add to `RCAction.all` static property
 3. Handle action in [IClickApp.swift](IClick/IClickApp.swift) in `actionHandler()` method
 4. Extension receives action via menu callback and sends message to main app
 
 ### Adding New File Templates
 
-1. Add to `NewFile` model in [Models.swift](IClick/Model/Models.swift)
+1. Add to `NewFile` in [RCBase.swift](IClick/Model/RCBase.swift)
 2. Add template file to [Assets.xcassets](IClick/Assets.xcassets/)
 3. Handle creation in [IClickApp.swift](IClick/IClickApp.swift) in `createFile()` method
 
@@ -106,13 +107,19 @@ When adding new message types:
 2. Register message handler in appropriate init method
 3. Update contract documentation in [specs/001-macos-app-macos/contracts/app-extension-communication.md](specs/001-macos-app-macos/contracts/app-extension-communication.md)
 
-### Security-Scoped Resource Access
+### File Access
 
-When working with files outside app sandbox:
-1. User must grant permission via `NSOpenPanel`
-2. Store bookmark data using `URL.bookmarkData(options: ...)`
-3. Access files with `startAccessingSecurityScopedResource()` / `stopAccessingSecurityScopedResource()`
-4. See `deleteFoldorFile()` and `createFile()` in [IClickApp.swift](IClick/IClickApp.swift) for examples
+The main app is **not sandboxed**, so it touches the filesystem directly — there are no
+security-scoped bookmarks (`bookmarkData` / `startAccessingSecurityScopedResource`) anywhere
+anymore. The FinderSync extension *is* sandboxed, so it never does file I/O itself; it sends a
+message and lets the main app act.
+
+Destructive operations must stay recoverable:
+- Deleting moves to the Trash (`FileManager.trashItem`), never `removeItem`
+- Check `Utils.isProtectedFolder` before deleting
+- Filenames built from user-editable templates must be sanitized (no `/`, `:`, or `..`)
+
+See `deleteFolderFile()` and `doCreateFile()` in [IClickApp.swift](IClick/IClickApp.swift).
 
 ## Important Constraints
 
@@ -135,10 +142,15 @@ When working with files outside app sandbox:
 - Example: `@AppLog(category: "AppState") private var logger`
 
 ### Data Persistence
-- SwiftData models use `@Model` macro
-- Shared container via app group: `.group` `UserDefaults`
-- Shared model container: `SharedDataManager.sharedModelContainer`
-- Both app and extension access same database
+- Everything goes through `SharedSettings` ([StringExtension.swift](IClick/Shared/StringExtension.swift)),
+  a plist at `~/Library/Application Support/IClick/SharedSettings.plist`
+- **Single writer**: only the main app writes. `SharedSettings.set`/`save` are no-ops when
+  `isExtension` is true; the extension consumes a snapshot the app pushes over IPC
+  (`remotePayload`). Never let the extension write this file.
+- Migrations (`migrateFromLegacyIfNeeded`) must **fill missing keys only, never overwrite**,
+  and must read their sentinel with `object(forKey:)` — `string(forKey:)` returns nil for a `Bool`
+- `AppState.load()` decodes each section independently; a corrupt section must never fall back to
+  defaults *and save*, or it will erase the user's data
 
 ## Directory Structure
 
@@ -147,7 +159,7 @@ IClick/
 ├── IClick/                        # Main application target
 │   ├── IClickApp.swift           # App entry point & AppDelegate
 │   ├── AppState.swift            # Global state management
-│   ├── Model/                    # SwiftData models
+│   ├── Model/                    # Data models (RCBase.swift; Models.swift is a stub)
 │   ├── Settings/                 # Settings views (UI)
 │   ├── Shared/                   # Utilities & services
 │   ├── Assets.xcassets/          # Images, templates, icons
@@ -166,10 +178,19 @@ IClick/
 - Check that `FIFinderSyncController.default().directoryURLs` is set
 - Verify heartbeat messages are being sent/received
 
-### Security-Scope Access Fails
-- Ensure bookmarks are stored and retrieved correctly
-- Check `isStale` flag and refresh bookmarks if needed
-- Always call `stopAccessingSecurityScopedResource()` when done
+### Context Menu Shows Up Twice
+- Two `FinderSyncExt` processes are running. This is a LaunchServices registration problem,
+  usually caused by stale copies of the app (old `build/` output, xcarchive, old DerivedData).
+- `lsregister -dump | grep -i iclick` to see every registered copy, `lsregister -u <path>` the
+  stale ones, then `lsregister -f -R -trusted /Applications/Iclick.app`
+- Kill leftover processes and relaunch Finder afterwards
+
+### Config Changes Not Reaching the Extension
+- The extension is a read-only consumer; it only sees what the app pushes
+- `SharedSettings.set` does not notify anyone by itself — call `appState.sync()` (or
+  `notifyConfigChanged()`) after writing, or the menu keeps showing stale data
+- `submenu_icon_*` / `submenu_name_*` are read by the extension directly from the pushed
+  payload, so they need the same push
 
 ### SwiftUI Views Not Updating
 - Ensure `@MainActor` annotation when updating `@Published` properties

@@ -25,6 +25,16 @@ struct OpenWithApp: RCBase {
         itemName = url.deletingPathExtension().lastPathComponent
     }
 
+    /// 使用 bundle identifier 创建，id 用固定值确保跨进程一致
+    init?(id: String, bundleIdentifier identifier: String) {
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: identifier) else {
+            return nil
+        }
+        self.id = id
+        self.url = url
+        itemName = url.deletingPathExtension().lastPathComponent
+    }
+
     var url: URL
     var itemName: String
     var enabled: Bool = true
@@ -49,7 +59,9 @@ struct OpenWithApp: RCBase {
         url = try container.decode(URL.self, forKey: .url)
         itemName = try container.decode(String.self, forKey: .itemName)
         enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
-        showInMainMenu = try container.decodeIfPresent(Bool.self, forKey: .showInMainMenu) ?? true
+        // 默认值必须与属性声明(var showInMainMenu = false)和 init(appURL:) 的行为一致，
+        // 否则同一个 App「内存里新建」和「解码得到」会落在不同的菜单里
+        showInMainMenu = try container.decodeIfPresent(Bool.self, forKey: .showInMainMenu) ?? false
         inheritFromGlobalArguments = try container.decodeIfPresent(Bool.self, forKey: .inheritFromGlobalArguments) ?? true
         inheritFromGlobalEnvironment = try container.decodeIfPresent(Bool.self, forKey: .inheritFromGlobalEnvironment) ?? true
         arguments = try container.decodeIfPresent([String].self, forKey: .arguments) ?? []
@@ -68,10 +80,12 @@ extension OpenWithApp {
 
     static let vscode = OpenWithApp(bundleIdentifier: "com.microsoft.VSCode")
     static let terminal = OpenWithApp(bundleIdentifier: "com.apple.Terminal")
+
+    /// 使用固定 id（bundle identifier）替代随机 UUID，确保扩展和主应用 id 一致
     static var defaultApps: [OpenWithApp] {
         [
-            .terminal,
-            .vscode
+            OpenWithApp(id: "com.apple.Terminal", bundleIdentifier: "com.apple.Terminal"),
+            OpenWithApp(id: "com.microsoft.VSCode", bundleIdentifier: "com.microsoft.VSCode"),
         ].compactMap { $0 }
     }
 }

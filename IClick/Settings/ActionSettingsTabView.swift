@@ -90,14 +90,46 @@ struct ActionSettingsTabView: View {
         "commonDirs": "folder",
     ]
 
+    /// 默认子菜单名称（与扩展端 String(localized:) 保持一致，用于判断“是否自定义”）
+    static let defaultSubmenuNames: [String: String] = [
+        "newFiles": String(localized: "New File"),
+        "submenuApps": String(localized: "Favorite Apps"),
+        "commonDirs": String(localized: "Favorite Folders"),
+    ]
+
     /// 读取子菜单自定义图标
     private func submenuIcon(for id: String) -> String {
-        UserDefaults.group.string(forKey: "submenu_icon_\(id)") ?? Self.defaultSubmenuIcons[id] ?? "folder"
+        SharedSettings.string(forKey: "submenu_icon_\(id)") ?? Self.defaultSubmenuIcons[id] ?? "folder"
     }
 
-    /// 保存子菜单自定义图标
-    private func saveSubmenuIcon(_ icon: String, for id: String) {
-        UserDefaults.group.set(icon, forKey: "submenu_icon_\(id)")
+    /// 读取子菜单显示名称
+    private func submenuName(for id: String) -> String {
+        if let custom = SharedSettings.string(forKey: "submenu_name_\(id)"), !custom.isEmpty {
+            return custom
+        }
+        return Self.defaultSubmenuNames[id] ?? id
+    }
+
+    /// 保存子菜单的名称与图标。
+    /// 等于内置默认值时删除键（= 未自定义），这样扩展端才能区分「用户显式设置」和「默认」，
+    /// 避免用户只是打开弹窗点保存就把默认的着色图标覆盖成无着色图标。
+    private func saveSubmenu(name: String, icon: String, for id: String) {
+        let defaultName = Self.defaultSubmenuNames[id] ?? id
+        let defaultIcon = Self.defaultSubmenuIcons[id] ?? "folder"
+
+        if name.isEmpty || name == defaultName {
+            SharedSettings.removeObject(forKey: "submenu_name_\(id)")
+        } else {
+            SharedSettings.set(name, forKey: "submenu_name_\(id)")
+        }
+        if icon.isEmpty || icon == defaultIcon {
+            SharedSettings.removeObject(forKey: "submenu_icon_\(id)")
+        } else {
+            SharedSettings.set(icon, forKey: "submenu_icon_\(id)")
+        }
+        SharedSettings.synchronize()
+        // 推送给扩展，否则右键菜单不会刷新
+        appState.sync()
     }
 
     /// 根据子菜单 ID 构建 MenuItemWrapper
@@ -105,13 +137,13 @@ struct ActionSettingsTabView: View {
         switch id {
         case "newFiles":
             guard hasEnabledNewFiles else { return nil }
-            return .submenu(id: "newFiles", name: String(localized: "New File"), icon: submenuIcon(for: "newFiles"), iconColor: .blue, enabled: appState.showNewFiles)
+            return .submenu(id: "newFiles", name: submenuName(for: "newFiles"), icon: submenuIcon(for: "newFiles"), iconColor: .blue, enabled: appState.showNewFiles)
         case "submenuApps":
             guard hasSubmenuApps else { return nil }
-            return .submenu(id: "submenuApps", name: String(localized: "Favorite Apps"), icon: submenuIcon(for: "submenuApps"), iconColor: .purple, enabled: hasSubmenuApps)
+            return .submenu(id: "submenuApps", name: submenuName(for: "submenuApps"), icon: submenuIcon(for: "submenuApps"), iconColor: .purple, enabled: hasSubmenuApps)
         case "commonDirs":
             guard hasEnabledCommonDirs else { return nil }
-            return .submenu(id: "commonDirs", name: String(localized: "Favorite Folders"), icon: submenuIcon(for: "commonDirs"), iconColor: .green, enabled: appState.showCommonDirs)
+            return .submenu(id: "commonDirs", name: submenuName(for: "commonDirs"), icon: submenuIcon(for: "commonDirs"), iconColor: .green, enabled: appState.showCommonDirs)
         default:
             return nil
         }
@@ -194,17 +226,15 @@ struct ActionSettingsTabView: View {
         .sheet(item: $editingApp) { app in
             AppEditSheet(item: app) { result in
                 switch result {
-                case .save(let name, let arguments, let environment, let icon):
+                case .save(let name, let url, let icon):
+                    // 图标与路径一并交给 updateApp 落盘（之前是直接改内存数组，永远不保存）
                     appState.updateApp(
                         id: app.id,
                         itemName: name,
-                        arguments: arguments,
-                        environment: environment
+                        url: url,
+                        icon: icon,
+                        replaceIcon: true
                     )
-                    if let idx = appState.apps.firstIndex(where: { $0.id == app.id }) {
-                        appState.apps[idx].icon = icon
-                    }
-                    messager.sendMessage(name: "running", data: MessagePayload(action: "running", target: []))
                 case .cancel:
                     break
                 }
@@ -217,7 +247,6 @@ struct ActionSettingsTabView: View {
                 onAdd: { action in
                     appState.actions.append(action)
                     appState.toggleActionItem()
-                    messager.sendMessage(name: "running", data: MessagePayload(action: "running", target: []))
                 },
                 onDismiss: { showAddSheet = false }
             )
@@ -229,14 +258,14 @@ struct ActionSettingsTabView: View {
                     appState.actions[idx].icon = icon
                     appState.actions[idx].requireSelection = requireSelection
                     appState.toggleActionItem()
-                    messager.sendMessage(name: "running", data: MessagePayload(action: "running", target: []))
                 }
                 editingAction = nil
             }
         }
         .sheet(item: $editingSubmenu) { submenu in
             SubmenuEditSheet(id: submenu.id, name: submenu.name, icon: submenuIcon(for: submenu.id)) { newName, newIcon in
-                saveSubmenuIcon(newIcon, for: submenu.id)
+                // 之前这里把 newName 丢掉了，改名字等于没改
+                saveSubmenu(name: newName, icon: newIcon, for: submenu.id)
                 editingSubmenu = nil
             }
         }
@@ -294,7 +323,6 @@ struct ActionSettingsTabView: View {
                         if let idx = appState.actions.firstIndex(where: { $0.id == action.id }) {
                             appState.actions[idx].enabled = newVal
                             appState.toggleActionItem()
-                            messager.sendMessage(name: "running", data: MessagePayload(action: "running", target: []))
                         }
                     case .submenu(let id, _, _, _, _):
                         switch id {
@@ -305,7 +333,6 @@ struct ActionSettingsTabView: View {
                         default:
                             break
                         }
-                        messager.sendMessage(name: "running", data: MessagePayload(action: "running", target: []))
                     }
                 }
             ))
@@ -394,7 +421,6 @@ struct ActionSettingsTabView: View {
                 let newIdx = idx + offset
                 appState.actions.swapAt(idx, newIdx)
                 appState.toggleActionItem()
-                messager.sendMessage(name: "running", data: MessagePayload(action: "running", target: []))
             }
         case .submenu(let id, _, _, _, _):
             if let idx = appState.submenuOrder.firstIndex(of: id) {
@@ -419,7 +445,6 @@ struct ActionSettingsTabView: View {
             if let idx = appState.actions.firstIndex(where: { $0.id == action.id }) {
                 appState.actions.remove(at: idx)
                 appState.toggleActionItem()
-                messager.sendMessage(name: "running", data: MessagePayload(action: "running", target: []))
             }
         case .submenu:
             break

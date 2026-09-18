@@ -6,6 +6,7 @@
 //
 
 import AppKit
+import os.log
 import SwiftUI
 
 struct CommonDirsSettingTabView: View {

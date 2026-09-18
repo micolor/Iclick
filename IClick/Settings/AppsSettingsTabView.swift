@@ -41,8 +41,7 @@ struct AppsSettingsTabView: View {
                             ))
                     }
                     .onDelete { indexSet in
-                        appState.deleteApp(index: indexSet.first ?? 0)
-                        messager.sendMessage(name: "running", data: MessagePayload(action: "running", target: []))
+                        appState.deleteApps(at: indexSet)
                     }
                 }
             } header: {
@@ -57,7 +56,6 @@ struct AppsSettingsTabView: View {
                         panel.canChooseDirectories = false
                         if panel.runModal() == .OK, let url = panel.url {
                             appState.addApp(item: OpenWithApp(appURL: url))
-                            messager.sendMessage(name: "running", data: MessagePayload(action: "running", target: []))
                         }
                     } label: {
                         Label("添加", systemImage: "plus")
@@ -65,7 +63,6 @@ struct AppsSettingsTabView: View {
                     Button {
                         appState.apps.removeAll()
                         appState.sync()
-                        messager.sendMessage(name: "running", data: MessagePayload(action: "running", target: []))
                     } label: {
                         Label("重置", systemImage: "arrow.triangle.2.circlepath")
                     }
@@ -76,17 +73,16 @@ struct AppsSettingsTabView: View {
         .sheet(item: $editingItem) { item in
             AppEditSheet(item: item) { result in
                 switch result {
-                case .save(let name, let arguments, let environment, let icon):
+                case .save(let name, let url, let icon):
+                    // url / icon 一并交给 updateApp，由其内部 save() 统一落盘。
+                    // 之前是先 updateApp（内部 save）再直接改 apps[idx].icon，图标永远不会被保存。
                     appState.updateApp(
                         id: item.id,
                         itemName: name,
-                        arguments: arguments,
-                        environment: environment
+                        url: url,
+                        icon: icon,
+                        replaceIcon: true
                     )
-                    if let idx = appState.apps.firstIndex(where: { $0.id == item.id }) {
-                        appState.apps[idx].icon = icon
-                    }
-                    messager.sendMessage(name: "running", data: MessagePayload(action: "running", target: []))
                 case .cancel:
                     break
                 }
@@ -127,7 +123,6 @@ struct AppsSettingsTabView: View {
                 if let idx = appState.apps.firstIndex(where: { $0.id == item.id }) {
                     appState.apps[idx].showInMainMenu.toggle()
                     appState.sync()
-                    messager.sendMessage(name: "running", data: MessagePayload(action: "running", target: []))
                 }
             } label: {
                 Text(item.showInMainMenu ? "主菜单" : "子菜单")
@@ -179,7 +174,6 @@ struct AppsSettingsTabView: View {
                 if let idx = appState.apps.firstIndex(where: { $0.id == item.id }), idx > 0 {
                     appState.apps.move(fromOffsets: IndexSet(integer: idx), toOffset: idx - 1)
                     appState.sync()
-                    messager.sendMessage(name: "running", data: MessagePayload(action: "running", target: []))
                 }
             } label: {
                 Label("上移", systemImage: "arrow.up")
@@ -190,7 +184,6 @@ struct AppsSettingsTabView: View {
                 if let idx = appState.apps.firstIndex(where: { $0.id == item.id }), idx < appState.apps.count - 1 {
                     appState.apps.move(fromOffsets: IndexSet(integer: idx), toOffset: idx + 2)
                     appState.sync()
-                    messager.sendMessage(name: "running", data: MessagePayload(action: "running", target: []))
                 }
             } label: {
                 Label("下移", systemImage: "arrow.down")
@@ -202,7 +195,6 @@ struct AppsSettingsTabView: View {
             Button(role: .destructive) {
                 if let idx = appState.apps.firstIndex(where: { $0.id == item.id }) {
                     appState.deleteApp(index: idx)
-                    messager.sendMessage(name: "running", data: MessagePayload(action: "running", target: []))
                 }
             } label: {
                 Label("移除", systemImage: "trash")
@@ -252,7 +244,9 @@ struct AppDropDelegate: DropDelegate {
 // MARK: - 编辑 Sheet
 
 enum AppEditResult {
-    case save(name: String, arguments: [String], environment: [String: String], icon: String?)
+    // 该 Sheet 只有「名称 / 图标 / 应用路径」三项可编辑，
+    // arguments 与 environment 无 UI 入口，因此不再由这里传出（避免被空值覆盖）
+    case save(name: String, url: URL?, icon: String?)
     case cancel
 }
 
@@ -358,7 +352,7 @@ struct AppEditSheet: View {
                 .keyboardShortcut(.cancelAction)
 
                 Button("保存") {
-                    onResult(.save(name: appName, arguments: [], environment: [:], icon: appIcon.isEmpty ? nil : appIcon))
+                    onResult(.save(name: appName, url: appURL, icon: appIcon.isEmpty ? nil : appIcon))
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(appName.trimmingCharacters(in: .whitespaces).isEmpty)

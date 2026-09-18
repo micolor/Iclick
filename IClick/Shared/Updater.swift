@@ -7,7 +7,9 @@
 
 #if !APP_STORE
 
+import CryptoKit
 import Foundation
+import Security
 import SwiftUI
 
 // MARK: - 数据模型
@@ -24,7 +26,12 @@ struct GitHubRelease: Codable, Identifiable {
     let htmlUrl: String
 
     var version: String {
-        tagName.replacingOccurrences(of: "v", with: "")
+        // 只去掉开头的 "v"，不能全局替换：
+        // "v2.1.0-dev" 之类会被 replaceOccurrences 破坏成 "2.1.0-de"
+        if tagName.hasPrefix("v") || tagName.hasPrefix("V") {
+            return String(tagName.dropFirst())
+        }
+        return tagName
     }
 
     struct Asset: Codable {
@@ -33,9 +40,11 @@ struct GitHubRelease: Codable, Identifiable {
         let browserDownloadUrl: String
         let size: Int
         let contentType: String?
+        /// GitHub 对新上传的资源会返回 "sha256:<hex>"；老资源为 nil
+        let digest: String?
 
         enum CodingKeys: String, CodingKey {
-            case id, name, size
+            case id, name, size, digest
             case browserDownloadUrl = "browser_download_url"
             case contentType = "content_type"
         }
@@ -218,25 +227,99 @@ class UpdateManager: ObservableObject {
         isDownloading = true
         downloadProgress = 0
 
+        var downloadedURL: URL?
+        var extractionRoot: URL?
+
         do {
-            let downloadedURL = try await downloadAsset(asset: appZipAsset)
-            let appURL = try await extractAppZip(zipURL: downloadedURL)
-            try await installApplication(appURL: appURL)
-            try? FileManager.default.removeItem(at: downloadedURL)
-            try? FileManager.default.removeItem(at: appURL.deletingLastPathComponent())
+            let zipURL = try await downloadAsset(asset: appZipAsset)
+            downloadedURL = zipURL
+
+            // GitHub 对新上传的资源会给出 sha256，有就先校验再解压
+            if let digest = appZipAsset.digest, digest.lowercased().hasPrefix("sha256:") {
+                try verifySHA256(fileURL: zipURL, expectedHex: String(digest.dropFirst("sha256:".count)))
+            }
+
+            let extracted = try await extractAppZip(zipURL: zipURL)
+            extractionRoot = extracted.root
+
+            try verifyAppBundle(extracted.app)
+            try await installApplication(appURL: extracted.app)
+
             showInstallationCompleteAlert()
         } catch {
             updateError = "安装失败: \(error.localizedDescription)"
         }
 
+        // 失败路径之前不清理，临时目录里会一直堆积几十 MB 的下载包和解压结果
+        if let downloadedURL { try? FileManager.default.removeItem(at: downloadedURL) }
+        if let extractionRoot { try? FileManager.default.removeItem(at: extractionRoot) }
+
         isDownloading = false
+    }
+
+    /// 校验下载文件的 SHA-256（仅当 release 提供了 digest 时调用）
+    private func verifySHA256(fileURL: URL, expectedHex: String) throws {
+        let data = try Data(contentsOf: fileURL, options: .mappedIfSafe)
+        let actualHex = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        guard actualHex.caseInsensitiveCompare(expectedHex) == .orderedSame else {
+            throw InstallationError.integrityCheckFailed("下载文件校验失败，可能已损坏或被篡改")
+        }
+    }
+
+    /// 安装前的安全校验：必须是与当前应用同一个签名主体的合法副本。
+    /// 没有这层校验时，任何被替换的 zip 都能直接覆盖已安装的应用。
+    private func verifyAppBundle(_ appURL: URL) throws {
+        // 1. bundle id 必须与当前应用一致
+        guard let bundle = Bundle(url: appURL), let newBundleID = bundle.bundleIdentifier else {
+            throw InstallationError.invalidAppBundle("应用程序包无效或损坏")
+        }
+        guard let expectedBundleID = Bundle.main.bundleIdentifier, newBundleID == expectedBundleID else {
+            throw InstallationError.invalidAppBundle("应用程序标识不匹配，已中止安装")
+        }
+
+        // 2. 代码签名必须有效
+        let codesign = Process()
+        codesign.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+        codesign.arguments = ["--verify", "--deep", "--strict", appURL.path]
+        let errPipe = Pipe()
+        codesign.standardOutput = Pipe()
+        codesign.standardError = errPipe
+        try codesign.run()
+        codesign.waitUntilExit()
+        guard codesign.terminationStatus == 0 else {
+            let detail = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            throw InstallationError.integrityCheckFailed("更新包签名校验失败：\(detail)")
+        }
+
+        // 3. 签名 Team ID 必须与当前应用一致
+        if let currentTeam = teamIdentifier(of: Bundle.main.bundleURL),
+           let newTeam = teamIdentifier(of: appURL),
+           currentTeam != newTeam {
+            throw InstallationError.integrityCheckFailed("更新包签名主体与当前应用不一致，已中止安装")
+        }
+    }
+
+    /// 读取 bundle 的签名 Team ID；未签名或读取失败时返回 nil
+    private func teamIdentifier(of bundleURL: URL) -> String? {
+        var staticCode: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(bundleURL as CFURL, [], &staticCode) == errSecSuccess,
+              let staticCode else { return nil }
+        var info: CFDictionary?
+        guard SecCodeCopySigningInformation(staticCode, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
+              let dict = info as? [String: Any] else { return nil }
+        return dict[kSecCodeInfoTeamIdentifier as String] as? String
     }
 
     func downloadAsset(asset: GitHubRelease.Asset) async throws -> URL {
         let tempDir = FileManager.default.temporaryDirectory
         let downloadURL = tempDir.appendingPathComponent(asset.name)
 
-        var request = URLRequest(url: URL(string: asset.browserDownloadUrl)!)
+        // 不再强制解包：一个空的/非法的 download_url 会直接崩溃
+        guard let url = URL(string: asset.browserDownloadUrl), url.scheme?.lowercased() == "https" else {
+            throw DownloadError.downloadFailed("下载地址无效")
+        }
+        var request = URLRequest(url: url)
         request.setValue("application/octet-stream", forHTTPHeaderField: "Accept")
 
         let delegate = DownloadProgressDelegate { [weak self] progress in
@@ -248,7 +331,9 @@ class UpdateManager: ObservableObject {
         return try await withCheckedThrowingContinuation { continuation in
             let config = URLSessionConfiguration.default
             let session = URLSession(configuration: config, delegate: delegate, delegateQueue: .main)
-            let task = session.downloadTask(with: request) { [weak self] tempURL, response, error in
+            let task = session.downloadTask(with: request) { tempURL, response, error in
+                // session 会强引用 delegate，不 invalidate 的话每次更新都会泄漏一个 URLSession
+                defer { session.finishTasksAndInvalidate() }
                 if let error = error {
                     continuation.resume(throwing: error)
                     return
@@ -297,29 +382,33 @@ class UpdateManager: ObservableObject {
 
     // MARK: - 解压 APP Zip 文件
 
-    private func extractAppZip(zipURL: URL) async throws -> URL {
-        let tempDir = FileManager.default.temporaryDirectory
-        let extractionDir = tempDir.appendingPathComponent("app_extraction")
+    /// 解压 .app.zip，返回 (app 路径, 解压根目录)。
+    /// 返回根目录是给调用方做清理用的（解压失败时也要能删掉残留）。
+    private func extractAppZip(zipURL: URL) async throws -> (app: URL, root: URL) {
+        let extractionDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("app_extraction-\(UUID().uuidString)")
 
         try FileManager.default.createDirectory(at: extractionDir, withIntermediateDirectories: true)
 
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
-        process.arguments = ["-o", zipURL.path, "-d", extractionDir.path]
+        // unzip 是同步阻塞调用，放到主线程之外执行，否则安装期间整个界面卡住
+        try await Task.detached(priority: .userInitiated) {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
+            process.arguments = ["-o", zipURL.path, "-d", extractionDir.path]
 
-        let outputPipe = Pipe()
-        let errorPipe = Pipe()
-        process.standardOutput = outputPipe
-        process.standardError = errorPipe
+            let errorPipe = Pipe()
+            process.standardOutput = Pipe()
+            process.standardError = errorPipe
 
-        try process.run()
-        process.waitUntilExit()
+            try process.run()
+            process.waitUntilExit()
 
-        guard process.terminationStatus == 0 else {
-            let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-            let errorString = String(data: errorData, encoding: .utf8) ?? "未知错误"
-            throw InstallationError.zipExtractionFailed("解压失败: \(errorString)")
-        }
+            guard process.terminationStatus == 0 else {
+                let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+                let errorString = String(data: errorData, encoding: .utf8) ?? "未知错误"
+                throw InstallationError.zipExtractionFailed("解压失败: \(errorString)")
+            }
+        }.value
 
         let fileManager = FileManager.default
         let contents = try fileManager.contentsOfDirectory(at: extractionDir, includingPropertiesForKeys: nil)
@@ -328,7 +417,7 @@ class UpdateManager: ObservableObject {
             throw InstallationError.noAppFound("在ZIP文件中未找到.app应用程序")
         }
 
-        return appURL
+        return (appURL, extractionDir)
     }
 
     // MARK: - 请求文件夹权限
@@ -363,14 +452,37 @@ class UpdateManager: ObservableObject {
             try await requestApplicationsFolderAccess()
         }
 
-        if fileManager.fileExists(atPath: destinationAppURL.path) {
-            try fileManager.trashItem(at: destinationAppURL, resultingItemURL: nil)
+        // 先在同卷的隐藏名字下完成复制，再替换目标。
+        // 之前是「先 trash 掉旧应用 → 再 copy 新的」，copy 一旦失败用户就没有应用了。
+        let stagingURL = applicationsURL.appendingPathComponent(".iclick-staging-\(UUID().uuidString).app")
+        try? fileManager.removeItem(at: stagingURL)
+        try fileManager.copyItem(at: appURL, to: stagingURL)
+
+        guard Bundle(url: stagingURL) != nil else {
+            try? fileManager.removeItem(at: stagingURL)
+            throw InstallationError.invalidAppBundle("应用程序包无效或损坏")
         }
 
-        try fileManager.copyItem(at: appURL, to: destinationAppURL)
+        var backupURL: URL?
+        if fileManager.fileExists(atPath: destinationAppURL.path) {
+            let backup = applicationsURL.appendingPathComponent(".iclick-backup-\(UUID().uuidString).app")
+            try fileManager.moveItem(at: destinationAppURL, to: backup)
+            backupURL = backup
+        }
 
-        guard Bundle(url: destinationAppURL) != nil else {
-            throw InstallationError.invalidAppBundle("应用程序包无效或损坏")
+        do {
+            try fileManager.moveItem(at: stagingURL, to: destinationAppURL)
+        } catch {
+            // 替换失败就把旧应用放回去，避免用户失去已安装的应用
+            if let backupURL, !fileManager.fileExists(atPath: destinationAppURL.path) {
+                try? fileManager.moveItem(at: backupURL, to: destinationAppURL)
+            }
+            try? fileManager.removeItem(at: stagingURL)
+            throw error
+        }
+
+        if let backupURL {
+            try? fileManager.trashItem(at: backupURL, resultingItemURL: nil)
         }
     }
 
@@ -424,7 +536,7 @@ class UpdateManager: ObservableObject {
 
     // MARK: - 错误类型
 
-    enum DownloadError: LocalizedError {
+    enum DownloadError: LocalizedError, Sendable {
         case downloadFailed(String)
 
         var errorDescription: String? {
@@ -435,11 +547,12 @@ class UpdateManager: ObservableObject {
         }
     }
 
-    enum InstallationError: LocalizedError {
+    enum InstallationError: LocalizedError, Sendable {
         case zipExtractionFailed(String)
         case noAppFound(String)
         case invalidAppBundle(String)
         case permissionDenied(String)
+        case integrityCheckFailed(String)
 
         var errorDescription: String? {
             switch self {
@@ -450,6 +563,8 @@ class UpdateManager: ObservableObject {
             case .invalidAppBundle(let message):
                 return message
             case .permissionDenied(let message):
+                return message
+            case .integrityCheckFailed(let message):
                 return message
             }
         }
