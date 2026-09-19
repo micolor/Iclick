@@ -185,20 +185,68 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return false
     }
 
+    /// 调用 AppleScript 子程序所需的 AppleEvent 常量。
+    /// 它们在 AppleScript.h / OpenScripting.h 里，Swift 侧不自动可见；直接写 FourCC
+    /// 字面量，免得为了这几个常量去 `import Carbon`（那会把整个 Carbon 拖进来）。
+    private enum ASEvent {
+        static let applescriptSuite: FourCharCode = 0x6173_6372 // 'ascr' kASAppleScriptSuite
+        static let subroutine: FourCharCode = 0x7073_6272       // 'psbr' kASSubroutineEvent
+        static let subroutineName: FourCharCode = 0x736E_616D   // 'snam' keyASSubroutineName
+    }
+
+    /// 只编译一次的 Finder 删除脚本。
+    ///
+    /// 路径是通过 AppleEvent 参数传进去的，**不是拼进脚本源码**，所以：
+    /// 1. 不需要手工转义反斜杠/引号（原来那两行 replaceOccurrences 已删掉，
+    ///    含引号的文件名也不会再把脚本拼坏）；
+    /// 2. 只编译这一次。原来每个路径都 `NSAppleScript(source:)` 新建一个 ——
+    ///    在批量删除的循环里就是 N 次编译 + N 次 Finder IPC，全部压在主线程上。
+    ///
+    /// 线程说明：NSAppleScript 不是线程安全的。这里只由 `deleteFolderFile` 调用，
+    /// 而它经 `Messager` 的 `DispatchQueue.main.async` 进来，始终在主线程串行执行。
+    private static let finderDeleteScript: NSAppleScript? = {
+        // `set f to POSIX file p` 必须留在 tell 块**外面**。
+        // 写成 `tell application "Finder" to delete (POSIX file p)` 时，AppleScript 会把
+        // `POSIX file` 当成 Finder 的元素去解析，直接报 -1728「Can't get POSIX file ...」——
+        // 实测四种写法，只有把强制转换提到 tell 之外（或写成 `p as POSIX file`）能通过。
+        // 原来的实现是顶层一句 tell、路径又是源码字面量，所以没踩到这个坑。
+        let source = """
+        on iclickDelete(p)
+            set f to POSIX file p
+            tell application "Finder" to delete f
+        end iclickDelete
+        """
+        guard let script = NSAppleScript(source: source) else { return nil }
+        var error: NSDictionary?
+        script.compileAndReturnError(&error)
+        return error == nil ? script : nil
+    }()
+
     /// 通过 AppleScript 让 Finder 删除文件（绕过沙盒限制）
     @discardableResult
     private func deleteViaFinder(path: String) -> Bool {
-        let escaped = path.replacingOccurrences(of: "\\", with: "\\\\")
-                         .replacingOccurrences(of: "\"", with: "\\\"")
-        let source = "tell application \"Finder\" to delete (POSIX file \"\(escaped)\")"
-        guard let script = NSAppleScript(source: source) else {
-            logger.error("deleteViaFinder AppleScript 创建失败: \(path)")
+        guard let script = Self.finderDeleteScript else {
+            logger.error("deleteViaFinder AppleScript 不可用: \(path)")
             return false
         }
+
+        let event = NSAppleEventDescriptor.appleEvent(
+            withEventClass: AEEventClass(ASEvent.applescriptSuite),
+            eventID: AEEventID(ASEvent.subroutine),
+            targetDescriptor: nil,
+            returnID: AEReturnID(-1),       // kAutoGenerateReturnID
+            transactionID: AETransactionID(0) // kAnyTransactionID
+        )
+        event.setParam(NSAppleEventDescriptor(string: "iclickDelete"),
+                       forKeyword: AEKeyword(ASEvent.subroutineName))
+        let arguments = NSAppleEventDescriptor.list()
+        arguments.insert(NSAppleEventDescriptor(string: path), at: 1)
+        event.setParam(arguments, forKeyword: AEKeyword(keyDirectObject))
+
         var error: NSDictionary?
-        script.executeAndReturnError(&error)
+        script.executeAppleEvent(event, error: &error)
         if let error = error {
-            logger.error("deleteViaFinder AppleScript 执行失败: \(error), path: \(path)")
+            logger.error("deleteViaFinder 执行失败: \(error), path: \(path)")
             return false
         }
         logger.info("deleteViaFinder 已删除: \(path)")
@@ -495,14 +543,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
 
+    /// 复制路径到剪贴板。
+    ///
+    /// 多选时复制**全部**路径，每行一条 —— 与「剪切」的写法（joined(separator: "\n")）一致。
+    /// 原来只取 `target.first`，选中 3 个文件时后 2 个被静默丢掉；
+    /// 单选时输出与原来逐字节相同（单个元素的 joined 就是它自己）。
     func copyPath(_ target: [String]) {
-        if let dirPath = target.first {
-            let pasteboard = NSPasteboard.general
-            // must do to fix bug
-            pasteboard.clearContents()
-
-            pasteboard.setString(dirPath.removingPercentEncoding ?? dirPath, forType: .string)
-        }
+        let paths = target.map { $0.removingPercentEncoding ?? $0 }
+        guard !paths.isEmpty else { return }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(paths.joined(separator: "\n"), forType: .string)
     }
 
     /// 剪切文件：将选中文件路径存入剪切板，等待粘贴
@@ -538,9 +589,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return urls.map { $0.path }
         }
 
-        // 方式2：通过 .fileURL 类型读取 file:// URL 字符串
-        if let fileURLStrings = pasteboard.propertyList(forType: .fileURL) as? [String] {
-            return fileURLStrings.compactMap { URL(string: $0)?.path }
+        // 方式2：通过 .fileURL 类型读取 file:// URL 字符串。
+        // propertyList(forType: .fileURL) 返回的是**单个 String**，不是数组
+        // （实测：往该类型写 String 取回 __NSCFConstantString，写 [String] 则返回 nil），
+        // 所以原来那句 `as? [String]` 恒为 nil —— 这条回退分支从来没生效过。
+        if let plist = pasteboard.propertyList(forType: .fileURL) {
+            var strings: [String] = []
+            if let one = plist as? String {
+                strings = [one]
+            } else if let many = plist as? [String] {
+                strings = many
+            }
+            // 只认 file:// —— URL(string:).path 对 https:// 也会给出一个看起来像路径的值
+            let paths = strings.compactMap { str -> String? in
+                guard let url = URL(string: str), url.isFileURL else { return nil }
+                return url.path
+            }
+            if !paths.isEmpty { return paths }
         }
 
         // 方式3：通过 .string 类型读取路径文本
@@ -609,13 +674,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             let fileName = sourceURL.lastPathComponent
             let destItemURL = destBaseURL.appendingPathComponent(fileName)
 
-            // 文件名冲突时添加序号
+            // 文件名冲突时添加序号。
+            // ext / nameWithoutExt 是循环不变量，移出循环只算一次。
+            let ext = sourceURL.pathExtension
+            let nameWithoutExt = (!ext.isEmpty && fileName.hasSuffix("." + ext))
+                ? String(fileName.dropLast(ext.count + 1))
+                : fileName
             var finalURL = destItemURL
             var counter = 1
             while fm.fileExists(atPath: finalURL.path) {
-                let ext = sourceURL.pathExtension
-                let nameWithoutExt = fileName.hasSuffix("." + ext) ? String(fileName.dropLast(ext.count + 1)) : fileName
-                finalURL = destBaseURL.appendingPathComponent("\(nameWithoutExt) \(counter).\(ext)")
+                // 无扩展名时不能再补那个「.」，否则 "Photos" 会变成 "Photos 1."（尾随点号）。
+                // createFile 里的写法（"\(baseName)\(counter)\(safeExt)"）就没有这个点。
+                let suffix = ext.isEmpty ? "" : ".\(ext)"
+                finalURL = destBaseURL.appendingPathComponent("\(nameWithoutExt) \(counter)\(suffix)")
                 counter += 1
             }
 
