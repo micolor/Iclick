@@ -269,7 +269,11 @@ codesign --verify --deep --strict "$APP" || die "签名校验失败"
 # 沙箱权限必须真的签进去，否则系统会静默拒绝注册这个扩展
 codesign -d --entitlements - "$EXT" 2>&1 | grep -q 'com.apple.security.app-sandbox' \
     || die "扩展签名里缺少 app-sandbox —— 系统会拒绝注册，Finder 右键菜单将失效"
-ok "签名校验通过（扩展含 app-sandbox）"
+# App Group 权限同理：漏了不报错，只是扩展读不到群组容器里的自定义图标
+# （扩展是沙盒进程，读不到主应用的 Application Support）。同样静默，所以也校验。
+codesign -d --entitlements - "$EXT" 2>&1 | grep -q 'com.apple.security.application-groups' \
+    || die "扩展签名里缺少 application-groups —— Finder 菜单里的自定义图标会失效"
+ok "签名校验通过（扩展含 app-sandbox 与 application-groups）"
 
 # ---------------------------------------------------------------- 安装
 

@@ -4,5 +4,16 @@
 <dict>
 	<key>com.apple.security.files.bookmarks.app-scope</key>
 	<true/>
+	<!-- 扩展是沙盒进程，读不到 ~/Library/Application Support（那是主应用的真实路径）。
+	     自定义图标因此存在 App Group 容器里（见 Utils.customIconsDir），必须有这条才读得到。
+	     写在这里而不是靠 build setting 合成：scripts/build-local.sh 的 ensure_entitlements
+	     只会把 EXT_ENTITLEMENTS 里的项补成 <true/>，数组值得来自本文件。
+	     Xcode 构建那条路径是从描述文件自动注入的，手工签名没有描述文件。
+	     实测（同签名身份的沙盒 app 探针，带对照与反向对照）：
+	       带这条 → 群组容器可读可写；去掉 → 读写都失败，且 containerURL 仍会返回路径（会骗人）。 -->
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>group.33WRMMC62L.cn.anwen.IClick</string>
+	</array>
 </dict>
 </plist>
