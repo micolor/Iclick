@@ -467,13 +467,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
         } else {
             guard let dirPath = decodedTarget.first else { return }
-            // 容器菜单（在文件夹空白处右键）走的是这条分支：会批量改该目录下
+            // 容器菜单（在文件夹空白处右键）走这条分支：会批量改该目录下
             // **所有**子项的 hidden 标志。上面 ctx-items 分支拦了受保护路径，这里漏了——
             // 对 /Applications 这类目录执行，Finder 里看起来就像被清空了。
+            //
+            // 这里必须用更窄的 isSystemFolder，**不能用 isProtectedFolder**：
+            // 后者含 ~/Desktop、~/Applications，而「把桌面图标收起来」是正当需求，
+            // 拦掉就变成静默无操作（bd1f356 就是这么越界的）。
             // 注：unhide 有意不加这道拦截，它是「误隐藏」之后的恢复路径，
             // 拦掉反而会把人困住。
-            if Utils.isProtectedFolder(dirPath) {
-                logger.warning("跳过受保护的目录路径: \(dirPath)")
+            if Utils.isSystemFolder(dirPath) {
+                logger.warning("跳过系统目录，不对其内容做整体隐藏: \(dirPath)")
                 return
             }
             self.setDirContentsHidden(dirPath: dirPath, hidden: true)

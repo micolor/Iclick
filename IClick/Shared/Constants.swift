@@ -17,10 +17,8 @@ public enum Constants {
     static var appVersion: String {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "Unknown"
     }
-    static let protectedDirs = [
-        HomedirPath + "/Desktop/",
-        HomedirPath + "/Desktop/danger/",
-        HomedirPath + "/Applications/",
+    /// 系统目录：不属于用户，破坏性或批量操作都不该落在它们头上。
+    static let systemDirs = [
         "/Applications/",
         "/System/",
         "/Library/",
@@ -30,6 +28,17 @@ public enum Constants {
         "/sbin/",
         "/var/"
     ]
+
+    /// 受保护目录 = 需要保护的用户目录 + 全部系统目录。
+    /// 用户目录单独列出来是因为「删除」这类操作落在 ~/Desktop 上同样危险；
+    /// 但「隐藏该目录下全部子项」不是 —— 那个只在系统目录上才只可能是误操作，
+    /// 所以后者用的是更窄的 systemDirs（见 Utils.isSystemFolder）。
+    /// 写成拼接而非手抄两份，是为了结构上保证 systemDirs 恒为 protectedDirs 的子集。
+    static let protectedDirs = [
+        HomedirPath + "/Desktop/",
+        HomedirPath + "/Desktop/danger/",
+        HomedirPath + "/Applications/"
+    ] + systemDirs
     static let suitName = "group.33WRMMC62L.cn.anwen.IClick"
 
     /// 检测是否拥有完全磁盘访问权限

@@ -3,8 +3,24 @@ import Foundation
 import UniformTypeIdentifiers
 
 public class Utils {
-    /// 判断路径本身是否是受保护目录（只看自身，不匹配其子项）
+    /// 判断路径本身是否是受保护目录（含用户目录，只看自身，不匹配其子项）。
+    /// 用于删除等破坏性操作 —— 落在 ~/Desktop 上同样危险。
     public static func isProtectedFolder(_ path: String) -> Bool {
+        isFolder(path, in: Constants.protectedDirs)
+    }
+
+    /// 判断路径本身是否落在**系统目录**上（只看自身，不匹配其子项）。
+    ///
+    /// 比 isProtectedFolder 窄：**不含用户目录**（~/Desktop、~/Applications）。
+    /// 用于「隐藏该目录下的全部子项」这类批量操作 —— 那在用户自己的目录里是正当需求
+    /// （就想要个干净桌面），只有在系统目录上才只可能是误操作。
+    /// bd1f356 曾在这里误用 isProtectedFolder，导致桌面上右键「隐藏」变成静默无操作。
+    public static func isSystemFolder(_ path: String) -> Bool {
+        isFolder(path, in: Constants.systemDirs)
+    }
+
+    /// 两个判断共用的规范化 + 比对，避免两处各写一份日后漂移
+    private static func isFolder(_ path: String, in list: [String]) -> Bool {
         // 先规范化：展开 ~、折叠 . 与 .. 与重复斜杠，避免 "/System/../System" 这类写法绕过
         let expanded = (path as NSString).expandingTildeInPath
         var normalized = (expanded as NSString).standardizingPath
@@ -12,7 +28,7 @@ public class Utils {
         // 空路径无从判断，按危险处理
         if normalized.isEmpty { return true }
 
-        return Constants.protectedDirs.contains { protectedDir in
+        return list.contains { protectedDir in
             var dir = protectedDir
             while dir.count > 1 && dir.hasSuffix("/") { dir.removeLast() }
             // 大小写不敏感：APFS 默认大小写不敏感，/system 与 /System 是同一个目录
