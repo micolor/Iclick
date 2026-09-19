@@ -298,8 +298,10 @@ sleep 3
 # 注册是异步的，刚复制完 bundle 时查不到是正常的，所以要轮询而不是只查一次。
 # 整个 .app 是先 rm -rf 再 cp -R，pluginkit 要摘掉旧条目再重建，实测可能耗时一分钟以上。
 # 轮询期间定期重新触发一次注册，避免它一直卡在待重扫状态。
+# 上限给 180 秒而不是 60：2026-09-19 那次实测刚好在 60 秒出头注册成功，
+# 脚本却已经判失败并打了警告 —— 一个假的失败提示比多等两分钟更糟。
 ext_registered=0
-for i in $(seq 1 60); do
+for i in $(seq 1 180); do
     if pluginkit -m -v 2>/dev/null | grep -q "$EXT_PLUGIN_ID"; then
         ext_registered=1
         break

@@ -1,8 +1,11 @@
 import AppKit
 import Foundation
 import UniformTypeIdentifiers
+import os.log
 
 public class Utils {
+    private static let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "Utils", category: "utils")
+
     /// 判断路径本身是否是受保护目录（含用户目录，只看自身，不匹配其子项）。
     /// 用于删除等破坏性操作 —— 落在 ~/Desktop 上同样危险。
     public static func isProtectedFolder(_ path: String) -> Bool {
@@ -77,10 +80,23 @@ public class Utils {
         guard panel.runModal() == .OK, let url = panel.url else { return nil }
 
         let iconsDir = customIconsDir
-        try? FileManager.default.createDirectory(at: iconsDir, withIntermediateDirectories: true)
         let dest = iconsDir.appendingPathComponent(url.lastPathComponent)
-        try? FileManager.default.removeItem(at: dest)
-        try? FileManager.default.copyItem(at: url, to: dest)
+        do {
+            try FileManager.default.createDirectory(at: iconsDir, withIntermediateDirectories: true)
+            // 同名文件先删再复制。删失败要当成错误抛出来 —— 忽略它的话后面 copy 必然
+            // 报 "file exists"，两条 try? 叠在一起就看不出到底哪步坏了。
+            if FileManager.default.fileExists(atPath: dest.path) {
+                try FileManager.default.removeItem(at: dest)
+            }
+            try FileManager.default.copyItem(at: url, to: dest)
+        } catch {
+            // 失败必须返回 nil，不能返回 dest.path。返回路径会让设置里记下一个并不存在
+            // 的文件（三个调用点都是 `if let`，nil 会保持原图标不动），
+            // 而症状又恰好是「设置界面看着正常、Finder 菜单里变回系统图标」这种静默故障 ——
+            // 正是 customIconsDir 那条注释里描述的现象，别再制造一次。
+            logger.error("复制自定义图标失败: \(url.path) -> \(error.localizedDescription)")
+            return nil
+        }
         return dest.path
     }
 }
