@@ -453,46 +453,47 @@ class UpdateManager: ObservableObject {
             try await requestApplicationsFolderAccess()
         }
 
-        // .app 包动辄几十上百 MB，copyItem/moveItem 都是同步阻塞调用 —— 放在主线程上
-        // 整个替换过程界面是卡的（解压那段早就挪到主线程外了，这里当时漏了）。
-        // 闭包里只用到 URL 和 FileManager.default，不碰任何 @MainActor 状态，
-        // 所以整段逻辑可以原样外移，顺序和回滚语义都没动。
-        try await Task.detached(priority: .userInitiated) {
-            let fm = FileManager.default
+        // 先在同卷的隐藏名字下完成复制，再替换目标。
+        // 之前是「先 trash 掉旧应用 → 再 copy 新的」，copy 一旦失败用户就没有应用了。
+        //
+        // 这段**必须留在主 actor 上同步跑**，不要挪进 Task.detached。
+        // 63815e0 曾把它挪出去「避免界面卡顿」，实测是错的：整个 app 只有 5.9MB，
+        // copyItem 实测 17ms（同段的 codesign --verify 也只有 18ms），没有可感知的卡顿。
+        // 而挪走会丢掉一个要紧的性质：这里没有挂起点，主线程不会转 runloop，
+        // 用户按 Cmd+Q 插不进来。一旦挪到别的线程，退出就能落在 copyItem 中途
+        // （留下永远不会被清理的 .iclick-staging-*.app，全仓库只有创建没有清理），
+        // 或者落在两个 moveItem 之间（那一刻 /Applications 下两个名字都不在，
+        // 唯一的副本是隐藏的 .iclick-backup-*.app，用户看起来就是「应用没了」）。
+        let stagingURL = applicationsURL.appendingPathComponent(".iclick-staging-\(UUID().uuidString).app")
+        try? fileManager.removeItem(at: stagingURL)
+        try fileManager.copyItem(at: appURL, to: stagingURL)
 
-            // 先在同卷的隐藏名字下完成复制，再替换目标。
-            // 之前是「先 trash 掉旧应用 → 再 copy 新的」，copy 一旦失败用户就没有应用了。
-            let stagingURL = applicationsURL.appendingPathComponent(".iclick-staging-\(UUID().uuidString).app")
-            try? fm.removeItem(at: stagingURL)
-            try fm.copyItem(at: appURL, to: stagingURL)
+        guard Bundle(url: stagingURL) != nil else {
+            try? fileManager.removeItem(at: stagingURL)
+            throw InstallationError.invalidAppBundle("应用程序包无效或损坏")
+        }
 
-            guard Bundle(url: stagingURL) != nil else {
-                try? fm.removeItem(at: stagingURL)
-                throw InstallationError.invalidAppBundle("应用程序包无效或损坏")
+        var backupURL: URL?
+        if fileManager.fileExists(atPath: destinationAppURL.path) {
+            let backup = applicationsURL.appendingPathComponent(".iclick-backup-\(UUID().uuidString).app")
+            try fileManager.moveItem(at: destinationAppURL, to: backup)
+            backupURL = backup
+        }
+
+        do {
+            try fileManager.moveItem(at: stagingURL, to: destinationAppURL)
+        } catch {
+            // 替换失败就把旧应用放回去，避免用户失去已安装的应用
+            if let backupURL, !fileManager.fileExists(atPath: destinationAppURL.path) {
+                try? fileManager.moveItem(at: backupURL, to: destinationAppURL)
             }
+            try? fileManager.removeItem(at: stagingURL)
+            throw error
+        }
 
-            var backupURL: URL?
-            if fm.fileExists(atPath: destinationAppURL.path) {
-                let backup = applicationsURL.appendingPathComponent(".iclick-backup-\(UUID().uuidString).app")
-                try fm.moveItem(at: destinationAppURL, to: backup)
-                backupURL = backup
-            }
-
-            do {
-                try fm.moveItem(at: stagingURL, to: destinationAppURL)
-            } catch {
-                // 替换失败就把旧应用放回去，避免用户失去已安装的应用
-                if let backupURL, !fm.fileExists(atPath: destinationAppURL.path) {
-                    try? fm.moveItem(at: backupURL, to: destinationAppURL)
-                }
-                try? fm.removeItem(at: stagingURL)
-                throw error
-            }
-
-            if let backupURL {
-                try? fm.trashItem(at: backupURL, resultingItemURL: nil)
-            }
-        }.value
+        if let backupURL {
+            try? fileManager.trashItem(at: backupURL, resultingItemURL: nil)
+        }
     }
 
     // MARK: - 显示安装完成提示
