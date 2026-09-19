@@ -83,11 +83,6 @@ macho_versions() {
     ' "$1"
 }
 
-# 用 null 分隔读取文件列表，避免文件名里的空格把参数拆开
-# （swift-collections 里有 `OrderedSet+Partial MutableCollection.swift` 这类名字，
-#   不这样的话会被拆成 `MutableCollection.swift` 并报 "filename used twice"）
-swift_sources() { find "$1" -name '*.swift' -print0 | sort -z | tr '\0' '\n'; }
-
 # 把 build settings 合成的权限项补进 entitlements 文件。
 # Xcode 签名前会做这一步，手工 codesign 不会：
 #   ENABLE_APP_SANDBOX = YES       → com.apple.security.app-sandbox
@@ -159,57 +154,16 @@ ok "SDK: $SDK (Version $DEP_SDK_VERSION)"
 ok "签名身份: $SIGN_ID"
 ok "bundle 模板: $TEMPLATE"
 
-# 源码依赖包：由 Xcode 的 SwiftPM 检出，路径带哈希，需要搜索
-DEP_CHECKOUTS="$(dirname "$(find "$HOME/Library/Developer/Xcode/DerivedData" \
-    -maxdepth 4 -type d -name 'swift-collections' -print -quit 2>/dev/null)")"
-[ -d "$DEP_CHECKOUTS" ] \
-    || die "找不到 SwiftPM 依赖检出目录，请先用 Xcode 打开一次工程以拉取依赖"
-ok "依赖检出目录: $DEP_CHECKOUTS"
-
-# ---------------------------------------------------------------- 编译依赖模块
+# ---------------------------------------------------------------- 依赖
 #
-# 这些模块必须用**同一个 SDK** 编译，否则编译主工程时 swiftc 会拒绝加载：
+# 这里曾经要手工编译三个 SwiftPM 依赖模块（swift-collections 的
+# InternalCollectionsUtilities / OrderedCollections，以及 ZIPFoundation）。
+# 它们必须用同一个 SDK 编译，否则 swiftc 会拒绝加载：
 #   cannot load module 'X' built with SDK 'macosx27.0' when using SDK 'macosx26.5'
-
-MODS="$BUILD_DIR/mods"
-log "编译依赖模块（SDK ${SDK_VERSION}）"
-mkdir -p "$MODS"
-
-# swift-collections 的 Package.swift 显式开启了这些特性（见其 swiftSettings），
-# 不照搬的话 `@_lifetime` / `~Escapable` 等写法会直接编译不过。
-COLLECTIONS_FLAGS=(
-    -enable-upcoming-feature MemberImportVisibility
-    -enable-experimental-feature BuiltinModule
-    -enable-experimental-feature Lifetimes
-    -enable-experimental-feature InoutLifetimeDependence
-    -enable-experimental-feature AddressableParameters
-    -enable-experimental-feature AddressableTypes
-)
-
-build_dep() {
-    local name="$1" srcdir="$2" swiftver="$3"; shift 3
-    local -a srcs=()
-    while IFS= read -r f; do [ -n "$f" ] && srcs+=("$f"); done < <(swift_sources "$srcdir")
-
-    # -package-name 是 swift-collections 用 `package` 访问级别所必需的
-    "$SWIFTC" -c -o "$MODS/$name.o" \
-        -sdk "$SDK" -target "$DEPLOY_TARGET" -swift-version "$swiftver" -Onone \
-        -whole-module-optimization -module-name "$name" -package-name iclick \
-        -emit-module -emit-module-path "$MODS/$name.swiftmodule" \
-        -I "$MODS" "$@" "${srcs[@]}" > "$MODS/$name.log" 2>&1 \
-        || { grep 'error:' "$MODS/$name.log" | head -5 >&2; die "$name 编译失败（完整日志 $MODS/$name.log）"; }
-    ok "$name"
-}
-
-build_dep InternalCollectionsUtilities \
-    "$DEP_CHECKOUTS/swift-collections/Sources/InternalCollectionsUtilities" 6 "${COLLECTIONS_FLAGS[@]}"
-build_dep OrderedCollections \
-    "$DEP_CHECKOUTS/swift-collections/Sources/OrderedCollections" 6 "${COLLECTIONS_FLAGS[@]}"
-# ZIPFoundation 在 Swift 6 严格并发下过不了（maxUInt32 等全局可变状态），按 Swift 5 编
-build_dep ZIPFoundation \
-    "$DEP_CHECKOUTS/ZIPFoundation/Sources/ZIPFoundation" 5
-
-DEP_OBJS=("$MODS/InternalCollectionsUtilities.o" "$MODS/OrderedCollections.o" "$MODS/ZIPFoundation.o")
+# 为了迁就 swift-collections 还得照搬六个实验性 feature flag 和 -package-name。
+#
+# 现在两个依赖都已移除，源码不再引用任何一个（见提交信息），
+# 这一步连同它的检出目录探测一起删掉了。
 
 # 全局框架。注意 shell 不会对未加引号的变量做分词，
 # 这些必须逐个写成独立参数，不能塞进一个字符串变量里。
@@ -230,7 +184,7 @@ mkdir -p "$OUT"
 log "编译主应用（-Onone，与用户原版的 Debug 构建对齐）"
 "$SWIFTC" -c -o "$OUT/app.o" \
     -sdk "$SDK" -target "$DEPLOY_TARGET" -swift-version 6 -Onone \
-    -whole-module-optimization -I "$MODS" -module-name IClick -plugin-path "$PLUGIN_PATH" \
+    -whole-module-optimization -module-name IClick -plugin-path "$PLUGIN_PATH" \
     "$REPO_ROOT"/IClick/*.swift "$REPO_ROOT"/IClick/Model/*.swift \
     "$REPO_ROOT"/IClick/Settings/*.swift "$REPO_ROOT"/IClick/Shared/*.swift \
     > "$OUT/app-compile.log" 2>&1 \
@@ -239,7 +193,7 @@ ok "主应用编译通过（$(grep -c 'warning:' "$OUT/app-compile.log" || true)
 
 log "链接主应用"
 "$SWIFTC" -o "$OUT/$APP_NAME" -sdk "$SDK" -target "$DEPLOY_TARGET" \
-    "${PLATFORM_VERSION[@]}" "$OUT/app.o" "${DEP_OBJS[@]}" "${FRAMEWORKS[@]}" \
+    "${PLATFORM_VERSION[@]}" "$OUT/app.o" "${FRAMEWORKS[@]}" \
     > "$OUT/app-link.log" 2>&1 \
     || { tail -20 "$OUT/app-link.log" >&2; die "主应用链接失败"; }
 ok "主应用链接完成"
@@ -247,7 +201,7 @@ ok "主应用链接完成"
 log "编译 FinderSync 扩展"
 "$SWIFTC" -c -o "$OUT/ext.o" \
     -sdk "$SDK" -target "$DEPLOY_TARGET" -swift-version 6 -Onone \
-    -whole-module-optimization -application-extension -I "$MODS" -module-name FinderSyncExt \
+    -whole-module-optimization -application-extension -module-name FinderSyncExt \
     -plugin-path "$PLUGIN_PATH" \
     "$REPO_ROOT"/FinderSyncExt/*.swift "$REPO_ROOT"/IClick/AppState.swift \
     "$REPO_ROOT"/IClick/Model/*.swift "$REPO_ROOT"/IClick/Shared/*.swift \
@@ -258,7 +212,7 @@ ok "扩展编译通过"
 log "链接 FinderSync 扩展"
 "$SWIFTC" -o "$OUT/FinderSyncExt" -sdk "$SDK" -target "$DEPLOY_TARGET" -application-extension \
     -Xlinker -e -Xlinker _NSExtensionMain "${PLATFORM_VERSION[@]}" \
-    "$OUT/ext.o" "${DEP_OBJS[@]}" -framework AppKit -framework SwiftUI -framework FinderSync \
+    "$OUT/ext.o" -framework AppKit -framework SwiftUI -framework FinderSync \
     -framework ServiceManagement -framework CryptoKit -framework UniformTypeIdentifiers \
     -framework CoreServices -framework Combine > "$OUT/ext-link.log" 2>&1 \
     || { tail -20 "$OUT/ext-link.log" >&2; die "扩展链接失败"; }

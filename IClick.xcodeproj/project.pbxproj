@@ -47,10 +47,6 @@
 		5CC9F09A2BC5445C00AF9B81 /* Messager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CC9F0992BC5445C00AF9B81 /* Messager.swift */; };
 		5CC9F09B2BC5464400AF9B81 /* Messager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CC9F0992BC5445C00AF9B81 /* Messager.swift */; };
 		5CC9F09D2BC567F000AF9B81 /* ActionSettingsTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CC9F09C2BC567F000AF9B81 /* ActionSettingsTabView.swift */; };
-		5CDD4A6F2E8EEC4700271E8D /* OrderedCollections in Frameworks */ = {isa = PBXBuildFile; productRef = 5CDD4A6E2E8EEC4700271E8D /* OrderedCollections */; };
-		5CDD4A712E8EEC6B00271E8D /* ZIPFoundation in Frameworks */ = {isa = PBXBuildFile; productRef = 5CDD4A702E8EEC6B00271E8D /* ZIPFoundation */; };
-		5CDD4A732E8EEC7D00271E8D /* OrderedCollections in Frameworks */ = {isa = PBXBuildFile; productRef = 5CDD4A722E8EEC7D00271E8D /* OrderedCollections */; };
-		5CDD4A752E8EEC8500271E8D /* ZIPFoundation in Frameworks */ = {isa = PBXBuildFile; productRef = 5CDD4A742E8EEC8500271E8D /* ZIPFoundation */; };
 		5CDFE3162CA3D65000AE6C95 /* SettingsWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CDFE3152CA3D63B00AE6C95 /* SettingsWindow.swift */; };
 		5CDFE3182CA3D66B00AE6C95 /* Constants.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CDFE3172CA3D66000AE6C95 /* Constants.swift */; };
 		5CDFE3192CA3D66B00AE6C95 /* Constants.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CDFE3172CA3D66000AE6C95 /* Constants.swift */; };
@@ -129,15 +125,11 @@
 		5C119D002BBE9B9900B2D7C4 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			files = (
-				5CDD4A6F2E8EEC4700271E8D /* OrderedCollections in Frameworks */,
-				5CDD4A752E8EEC8500271E8D /* ZIPFoundation in Frameworks */,
 			);
 		};
 		5C119D2D2BBEA9AC00B2D7C4 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			files = (
-				5CDD4A712E8EEC6B00271E8D /* ZIPFoundation in Frameworks */,
-				5CDD4A732E8EEC7D00271E8D /* OrderedCollections in Frameworks */,
 			);
 		};
 /* End PBXFrameworksBuildPhase section */
@@ -284,10 +276,6 @@
 				5CC1A00D2E90CDAD0048BBFB /* PBXTargetDependency */,
 			);
 			name = Iclick;
-			packageProductDependencies = (
-				5CDD4A6E2E8EEC4700271E8D /* OrderedCollections */,
-				5CDD4A742E8EEC8500271E8D /* ZIPFoundation */,
-			);
 			productName = IClick;
 			productReference = 5C119D032BBE9B9900B2D7C4 /* Iclick.app */;
 			productType = "com.apple.product-type.application";
@@ -303,10 +291,6 @@
 			buildRules = (
 			);
 			name = FinderSyncExt;
-			packageProductDependencies = (
-				5CDD4A702E8EEC6B00271E8D /* ZIPFoundation */,
-				5CDD4A722E8EEC7D00271E8D /* OrderedCollections */,
-			);
 			productName = FinderSyncExt;
 			productReference = 5C119D302BBEA9AC00B2D7C4 /* FinderSyncExt.appex */;
 			productType = "com.apple.product-type.app-extension";
@@ -338,10 +322,6 @@
 				Base,
 			);
 			mainGroup = 5C119CFA2BBE9B9900B2D7C4;
-			packageReferences = (
-				5C28E72C2D1900CB00A9F4C1 /* XCRemoteSwiftPackageReference "ZIPFoundation" */,
-				5CDD4A6D2E8EEC4700271E8D /* XCRemoteSwiftPackageReference "swift-collections" */,
-			);
 			preferredProjectObjectVersion = 90;
 			productRefGroup = 5C119D042BBE9B9900B2D7C4 /* Products */;
 			projectDirPath = "";
@@ -814,47 +794,6 @@
 		};
 /* End XCConfigurationList section */
 
-/* Begin XCRemoteSwiftPackageReference section */
-		5C28E72C2D1900CB00A9F4C1 /* XCRemoteSwiftPackageReference "ZIPFoundation" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/weichsel/ZIPFoundation.git";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 0.9.19;
-			};
-		};
-		5CDD4A6D2E8EEC4700271E8D /* XCRemoteSwiftPackageReference "swift-collections" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/apple/swift-collections.git";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 1.3.0;
-			};
-		};
-/* End XCRemoteSwiftPackageReference section */
-
-/* Begin XCSwiftPackageProductDependency section */
-		5CDD4A6E2E8EEC4700271E8D /* OrderedCollections */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 5CDD4A6D2E8EEC4700271E8D /* XCRemoteSwiftPackageReference "swift-collections" */;
-			productName = OrderedCollections;
-		};
-		5CDD4A702E8EEC6B00271E8D /* ZIPFoundation */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 5C28E72C2D1900CB00A9F4C1 /* XCRemoteSwiftPackageReference "ZIPFoundation" */;
-			productName = ZIPFoundation;
-		};
-		5CDD4A722E8EEC7D00271E8D /* OrderedCollections */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 5CDD4A6D2E8EEC4700271E8D /* XCRemoteSwiftPackageReference "swift-collections" */;
-			productName = OrderedCollections;
-		};
-		5CDD4A742E8EEC8500271E8D /* ZIPFoundation */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 5C28E72C2D1900CB00A9F4C1 /* XCRemoteSwiftPackageReference "ZIPFoundation" */;
-			productName = ZIPFoundation;
-		};
-/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 5C119CFB2BBE9B9900B2D7C4 /* Project object */;
 }

@@ -7,7 +7,6 @@
 
 import Combine
 import Foundation
-import OrderedCollections
 import SwiftUI
 
 @MainActor
@@ -268,13 +267,17 @@ class AppState: ObservableObject {
         path.hasSuffix("/") ? String(path.dropLast()) : path
     }
     
+    /// 注意：原先这里把每个数组都包成 `OrderedSet` 再编码，但
+    /// `OrderedSet.encode(to:)` 走的是 singleValueContainer，写出的是和 `Array`
+    /// **逐字节相同**的 plist 数组（二进制/XML 均已实测），包一层纯属浪费：
+    /// 每次保存都要多建一个 Set、多算一遍哈希。直接用数组编码。
     @MainActor
     private func save() throws {
         let encoder = PropertyListEncoder()
-        let appItemsData = try encoder.encode(OrderedSet(apps))
-        let actionItemsData = try encoder.encode(OrderedSet(actions))
-        let filetypeItemsData = try encoder.encode(OrderedSet(newFiles))
-        let permDirsData = try encoder.encode(OrderedSet(dirs))
+        let appItemsData = try encoder.encode(apps)
+        let actionItemsData = try encoder.encode(actions)
+        let filetypeItemsData = try encoder.encode(newFiles)
+        let permDirsData = try encoder.encode(dirs)
         let commonDirsData = try encoder.encode(cdirs)
         SharedSettings.set(appItemsData, forKey: Key.apps)
         SharedSettings.set(actionItemsData, forKey: Key.actions)
@@ -292,7 +295,7 @@ class AppState: ObservableObject {
     @MainActor
     func savePermissiveDir() throws {
         let encoder = PropertyListEncoder()
-        let permDirsData = try encoder.encode(OrderedSet(dirs))
+        let permDirsData = try encoder.encode(dirs)
         SharedSettings.set(permDirsData, forKey: Key.permDirs)
         SharedSettings.synchronize()
         if !inExt {
@@ -390,13 +393,12 @@ class AppState: ObservableObject {
         if let commonDirsData = SharedSettings.data(forKey: Key.commonDirs) {
             if let dirs = try? decoder.decode([CommonDir].self, from: commonDirsData) {
                 cdirs = dirs
-            } else if let dirs = try? decoder.decode(OrderedSet<CommonDir>.self, from: commonDirsData) {
-                // 兼容旧版 OrderedSet 编码格式
-                cdirs = Array(dirs)
-                // 迁到新格式
-                if !inExt { try? saveCommonDir() }
-                logger.info("load common dirs (migrated from OrderedSet)")
             } else {
+                // 这里是空的「兼容旧版 OrderedSet 格式」分支已被删除：
+                // OrderedSet 与 Array 的 plist 编码逐字节相同（已实测），
+                // 凡是 OrderedSet 能解码的字节，[CommonDir] 必然也能解码，
+                // 所以该分支永远不可达。
+                logger.error("commonDirs 解码失败")
                 cdirs = []
             }
             logger.info("load common dirs success")
