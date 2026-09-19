@@ -393,15 +393,18 @@ class AppState: ObservableObject {
         if let commonDirsData = SharedSettings.data(forKey: Key.commonDirs) {
             if let dirs = try? decoder.decode([CommonDir].self, from: commonDirsData) {
                 cdirs = dirs
+                logger.info("load common dirs success")
             } else {
-                // 这里是空的「兼容旧版 OrderedSet 格式」分支已被删除：
-                // OrderedSet 与 Array 的 plist 编码逐字节相同（已实测），
-                // 凡是 OrderedSet 能解码的字节，[CommonDir] 必然也能解码，
-                // 所以该分支永远不可达。
-                logger.error("commonDirs 解码失败")
-                cdirs = []
+                // 空的「兼容旧版 OrderedSet 格式」分支已删除：OrderedSet 与 Array 的
+                // plist 编码逐字节相同（已实测），凡是 OrderedSet 能解码的字节
+                // [CommonDir] 必然也能解码，所以那个分支永远不可达。
+                //
+                // 失败时必须置位：这是本函数里唯一漏掉 skipInitialSave 的一段。
+                // 一旦同时满足「fileTypes 键缺失」（needsInitialSave 为真），
+                // 函数末尾的首次落盘就会把空数组写回磁盘，直接抹掉用户的常用目录。
+                logger.error("commonDirs 解码失败，保留原值且不写回")
+                skipInitialSave = true
             }
-            logger.info("load common dirs success")
         } else {
             cdirs = []
         }
