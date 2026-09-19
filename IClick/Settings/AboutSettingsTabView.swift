@@ -6,8 +6,6 @@
 //
 
 import AppKit
-import ExtensionFoundation
-import ExtensionKit
 import FinderSync
 import SwiftUI
 

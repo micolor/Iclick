@@ -5,9 +5,7 @@
 //  Created by 李旭 on 2024/4/9.
 //
 
-import AppKit
 import Foundation
-import ScriptingBridge
 
 struct MessagePayload: Codable {
     var action: String = ""
@@ -35,7 +33,8 @@ class Messager: @unchecked Sendable {
 
     func sendMessage(name: String, data: MessagePayload) {
         let message: String = createMessageData(messagePayload: data)
-        logger.warning("start sendMessage ... to \(name)")
+        // 原来是 warning：心跳每 3 秒一条，等于永久往统一日志写 warning（warning 默认落盘）
+        logger.debug("sendMessage to \(name, privacy: .public)")
         center.postNotificationName(NSNotification.Name(name), object: message, userInfo: nil, deliverImmediately: true)
     }
 

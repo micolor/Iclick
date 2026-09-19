@@ -338,8 +338,10 @@ sleep 3
 
 # 扩展必须出现在 pluginkit 里，Finder 才会去加载它。没出现就是右键菜单不会生效。
 # 注册是异步的，刚复制完 bundle 时查不到是正常的，所以要轮询而不是只查一次。
+# 整个 .app 是先 rm -rf 再 cp -R，pluginkit 需要先摘掉旧条目再重建，
+# 这一步实测可能超过 15 秒，窗口给窄了会误报。
 ext_registered=0
-for _ in $(seq 1 15); do
+for _ in $(seq 1 45); do
     if pluginkit -m -v 2>/dev/null | grep -q "$EXT_PLUGIN_ID"; then
         ext_registered=1
         break

@@ -44,8 +44,10 @@ struct MenuBarView: View {
     private func actionQuit() {
         messager.sendMessage(name: "quit", data: MessagePayload(action: "quit"))
 
+        // 只是给 DNC 一点投递时间。postNotificationName 用的是 deliverImmediately: true，
+        // 本地回环投递远快于 1 秒 —— 原来等满 1 秒，退出的手感是明显卡一下。
         Task {
-            try? await Task.sleep(nanoseconds: UInt64(1.0 * 1e9))
+            try? await Task.sleep(nanoseconds: UInt64(0.3 * 1e9))
 
             NSApplication.shared.terminate(self)
         }

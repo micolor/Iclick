@@ -6,12 +6,8 @@
 //
 
 import AppKit
-import Cocoa
 @preconcurrency import FinderSync
 import UniformTypeIdentifiers
-
-// MARK: DELETE
-
 import OSLog
 
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "IClick", category: "FinderOpen")
@@ -64,7 +60,7 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
         invalidateMenuCache()
 
         FIFinderSyncController.default().directoryURLs = [myFolderURL]
-        NSLog(">>> FinderSync() launched from \(Bundle.main.bundlePath as NSString)")
+        logger.info("FinderSync launched from \(Bundle.main.bundlePath, privacy: .public)")
 
         messager.on(name: "quit") { [weak self] _ in
             self?.isHostAppOpen = false
@@ -182,7 +178,7 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
     }
 
     func heartBeat() {
-        logger.warning("start send message -- heartbeat")
+        logger.debug("start send message -- heartbeat")
         messager.sendMessage(name: Key.messageFromFinder, data: MessagePayload(action: "heartbeat", target: [], rid: ""))
     }
 
@@ -245,11 +241,11 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
     override func beginObservingDirectory(at url: URL) {
         // The user is now seeing the container's contents.
         // If they see it in more than one view at a time, we're only told once.
-        logger.info("beginObservingDirectoryAtURL: \(url.path as NSString)")
-        let dirs = FIFinderSyncController.default().directoryURLs!
-
-        for dir in dirs {
-            logger.notice("Sync directory set to \(dir.path)")
+        // 这里原本用 info/notice：notice 级别会落盘，而这个回调每次都遍历全部监控目录，
+        // 目录多的时候等于持续写磁盘。降为 debug（debug 不落盘、默认不采集）。
+        logger.debug("beginObservingDirectoryAtURL: \(url.path, privacy: .public)")
+        for dir in FIFinderSyncController.default().directoryURLs ?? [] {
+            logger.debug("Sync directory set to \(dir.path, privacy: .public)")
         }
     }
 
@@ -259,7 +255,8 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
     }
 
     override func requestBadgeIdentifier(for url: URL) {
-        NSLog("requestBadgeIdentifierForURL: %@", url.path as NSString)
+        // 此回调在 Finder 为每个文件请求角标时都会调用，属于热点，保持 debug
+        logger.debug("requestBadgeIdentifierForURL: \(url.path, privacy: .public)")
     }
 
     // MARK: - Menu and toolbar item support
@@ -285,18 +282,14 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
         // 缓存当前选中的文件 URL（macOS 15 上点击时 selectedItemURLs 可能返回 nil）
         cachedSelectedURLs = FIFinderSyncController.default().selectedItemURLs()
         cachedTargetURL = FIFinderSyncController.default().targetedURL()
-        NSLog("[IClick] menu(for:) 被调用, menuKind=\(String(describing: menuKind)), triggerManKind=\(String(describing: triggerManKind)), cachedSelected=\(cachedSelectedURLs?.count ?? 0), cachedTarget=\(cachedTargetURL?.path ?? "nil")")
 
         let dataVersion = currentDataVersion()
         let cacheKey = menuCacheKey(menuKind, version: dataVersion)
         if let cached = cachedMenus[cacheKey],
            let cachedVersion = cachedDataVersions[cacheKey],
            cachedVersion == dataVersion {
-            NSLog("[IClick] 缓存命中, menuKind=\(String(describing: menuKind)), version=\(dataVersion), tagToId.count=\(tagToId.count)")
             return cached
         }
-
-        NSLog(">>> 构建新菜单, version: \(dataVersion)")
         let applicationMenu = NSMenu(title: "Iclick")
 
         switch menuKind {
@@ -307,7 +300,7 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
             }
 
         default:
-            logger.warning("not have menuKind ")
+            logger.debug("not have menuKind ")
         }
 
         cachedMenus[cacheKey] = applicationMenu
@@ -324,7 +317,6 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
     }
 
     @MainActor @objc func createMenuForToolbar(_ applicationMenu: NSMenu, menuKind: FIMenuKind) {
-        NSLog(">>> createMenuForToolbar 开始构建菜单")
         // tag 映射不做全量清除（不同 menuKind 的菜单会共享映射），
         // 仅依靠递增 nextTag 保证标签唯一，旧映射被新构建覆盖。
 
@@ -344,17 +336,11 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
                 }
             case "newFiles":
                 if let fileMenuItem = createFileCreateMenuItem() {
-                    NSLog(">>> 添加新建文件菜单")
                     applicationMenu.addItem(fileMenuItem)
-                } else {
-                    NSLog(">>> 新建文件菜单为空")
                 }
             case "commonDirs":
                 if let commonDirMenuItem = createCommonDirMenuItem() {
-                    NSLog(">>> 添加常用目录菜单")
                     applicationMenu.addItem(commonDirMenuItem)
-                } else {
-                    NSLog(">>> 常用目录菜单为空")
                 }
             default:
                 break
@@ -365,7 +351,6 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
         for item in createActionMenuItems(for: menuKind) {
             applicationMenu.addItem(item)
         }
-        NSLog(">>> 菜单构建完成，共 \(applicationMenu.items.count) 项")
     }
 
     /// 一次遍历 apps 数组，同时构建主菜单项和子菜单项
@@ -527,7 +512,6 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
 
     @MainActor @objc func createActionMenuItems(for menuKind: FIMenuKind) -> [NSMenuItem] {
         var actionMenuitems: [NSMenuItem] = []
-        logger.info("createActionMenuItems: \(self.appState.actions.count) actions, \(self.appState.actions.filter(\.enabled).count) enabled")
 
         let hasSelection: Bool
         switch menuKind {
@@ -569,8 +553,6 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
                     menuItem.image = img
                 }
             }
-            logger.info("  action item: \(item.name), id: \(item.id), tag: \(menuItem.tag)")
-
             actionMenuitems.append(menuItem)
         }
         return actionMenuitems
@@ -578,16 +560,9 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
 
     // 创建文件菜单容器
     @MainActor @objc func createCommonDirMenuItem() -> NSMenuItem? {
-        guard appState.showCommonDirs else {
-            logger.info("常用路径菜单已关闭 (showCommonDirs=false)")
-            return nil
-        }
+        guard appState.showCommonDirs else { return nil }
         let commonDirs = appState.cdirs.filter { $0.enabled }
-        if commonDirs.isEmpty {
-            logger.warning("没有启用的常用路径")
-            return nil
-        }
-        logger.info("开始创建常用路径菜单项")
+        guard !commonDirs.isEmpty else { return nil }
 
         let menuItem = NSMenuItem()
         menuItem.title = submenuTitle("commonDirs", fallback: String(localized: "Favorite Folders"))
@@ -622,11 +597,9 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
             }
 
             submenu.addItem(menuItem)
-            logger.info("添加常用路径菜单项: \(dir.name)")
         }
 
         menuItem.submenu = submenu
-        logger.info("常用路径菜单创建完成")
         return menuItem
     }
 
@@ -638,14 +611,9 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
     }
 
     @MainActor @objc func createFileCreateMenuItem() -> NSMenuItem? {
-        guard appState.showNewFiles else {
-            logger.info("新建文件菜单已关闭 (showNewFiles=false)")
-            return nil
-        }
+        guard appState.showNewFiles else { return nil }
         let enabledFiletypeItems = appState.newFiles.filter(\.enabled)
-        if enabledFiletypeItems.isEmpty {
-            return nil
-        }
+        guard !enabledFiletypeItems.isEmpty else { return nil }
         let menuItem = NSMenuItem()
         menuItem.title = submenuTitle("newFiles", fallback: String(localized: "New File"))
         // 与设置保持一致：默认 doc.badge.plus + 蓝色着色；用户自定义了图标则优先用自定义的

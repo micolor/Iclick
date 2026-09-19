@@ -73,14 +73,11 @@ struct GeneralSettingsTabView: View {
         .onAppear {
             extensionEnabled = FIFinderSyncController.isExtensionEnabled
         }
+        // 扩展启用状态只在用户离开本 App 去系统设置里改，回来时必然触发
+        // didBecomeActive —— onForeground 已经覆盖了。原来那个 5 秒常驻定时器
+        // 只是重复同一件事，窗口开着时每分钟白醒 12 次，去掉。
         .onForeground {
             updateEnableState()
-        }
-        .onReceive(Timer.publish(every: 5, on: .main, in: .common).autoconnect()) { _ in
-            let newState = FIFinderSyncController.isExtensionEnabled
-            if extensionEnabled != newState {
-                extensionEnabled = newState
-            }
         }
     }
 

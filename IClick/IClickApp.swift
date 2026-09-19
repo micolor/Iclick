@@ -142,11 +142,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     func openCommonDirs(target: [String]) {
-        NSLog("[IClick-App] ===== openCommonDirs 被调用 =====")
-        NSLog("[IClick-App] target=\(target)")
         for dirPath in target {
             let path = dirPath.removingPercentEncoding ?? dirPath
-            NSLog("[IClick-App] 正在尝试打开: \(path)")
             openInFinder(path: path)
         }
     }
@@ -154,22 +151,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// 打开目录：NSWorkspace.open → /usr/bin/open（无需沙盒授权）
     @discardableResult
     private func openInFinder(path: String) -> Bool {
-        NSLog("[IClick-App] openInFinder: path=\(path)")
-
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue else {
-            NSLog("[IClick-App] ❌ 路径不存在或不是目录: \(path)")
+            logger.warning("路径不存在或不是目录: \(path, privacy: .public)")
             return false
         }
 
         // 第 1 层：NSWorkspace.open
         if NSWorkspace.shared.open(URL(fileURLWithPath: path)) {
-            NSLog("[IClick-App] ✓ NSWorkspace.open 成功")
             return true
         }
 
         // 第 2 层：/usr/bin/open
-        NSLog("[IClick-App] 尝试 /usr/bin/open")
+        logger.debug("NSWorkspace.open 失败，回退 /usr/bin/open: \(path, privacy: .public)")
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/bin/open")
         task.arguments = [path]
@@ -177,11 +171,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             try task.run()
             task.waitUntilExit()
             if task.terminationStatus == 0 {
-                NSLog("[IClick-App] ✓ /usr/bin/open 成功")
                 return true
             }
         } catch {
-            NSLog("[IClick-App] ❌ /usr/bin/open 失败: \(error.localizedDescription)")
+            logger.error("打开目录失败 \(path, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
         return false
     }
