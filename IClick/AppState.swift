@@ -318,8 +318,34 @@ class AppState: ObservableObject {
         load()
     }
 
-    /// 通知扩展配置已变更，直接推送完整配置
+    /// 待推送的配置任务，用于把短时间内的多次变更合并成一次推送
+    private var pendingConfigPush: Task<Void, Never>?
+
+    /// 通知扩展配置已变更。
+    ///
+    /// 做了两件事：
+    /// 1. **合并**。一次「重置右键菜单」会连着触发约 6 次（三个 setter / didSet 加上
+    ///    save()），每次都做全量导出 + 所有 Data 转 base64 + JSON + DNC 广播。
+    ///    80ms 窗口内的多次调用只保留最后一次。
+    /// 2. **不推给自己**。原来没有 inExt 判断，扩展在 `AppState.init` 里给
+    ///    submenuOrder 赋默认值就会触发 didSet → 发出一条 "running"，
+    ///    而扩展自己正监听着 "running" —— 于是它把自己的 isHostAppOpen 置为 true，
+    ///    主应用没运行也以为在运行，存活检测被架空。
     @MainActor private func notifyConfigChanged() {
+        guard !inExt else { return }
+
+        pendingConfigPush?.cancel()
+        pendingConfigPush = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 80_000_000)
+            guard !Task.isCancelled, let self else { return }
+            self.pushConfigToExtension()
+        }
+    }
+
+    /// 立即推送完整配置（合并窗口结束时执行一次）
+    @MainActor private func pushConfigToExtension() {
+        pendingConfigPush = nil
+
         let currentVersion = SharedSettings.integer(forKey: Key.configVersion)
         SharedSettings.set(currentVersion + 1, forKey: Key.configVersion)
 

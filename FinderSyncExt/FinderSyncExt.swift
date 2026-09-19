@@ -14,14 +14,11 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "IClick",
 
 class FinderSyncExt: FIFinderSync, @unchecked Sendable {
     var myFolderURL = URL(fileURLWithPath: "/Users/")
-    var isHostAppOpen = false
-    /// 主应用 bundle id（用于在扩展内按需拉起）
-    private let hostBundleID = "cn.anwen.IClick"
-    /// 上一轮心跳是否尚未收到主应用响应（用于存活检测）
-    private var heartbeatResponsePending = false
-    /// 连续未响应的次数：单次丢包不代表主应用已退出
-    private var heartbeatMissCount = 0
-    private var heartbeatTimer: Timer?
+    /// 主应用是否已就绪（进程在运行 **且** 它的消息观察者已注册）。
+    /// 由主应用推来的 "running" 置 true、"quit" 置 false；读取请用 isHostReady，它会兜底校正过期值。
+    private var isHostAppOpen = false
+    /// 主应用 bundle id（用于在扩展内按需拉起 / 判断其是否在运行）
+    private static let hostBundleID = "cn.anwen.IClick"
 
     lazy var appState: AppState = {
         MainActor.assumeIsolated { AppState(inExt: true) }
@@ -77,8 +74,6 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
             }
 
             self.isHostAppOpen = true
-            self.heartbeatResponsePending = false
-            self.heartbeatMissCount = 0
 
             // 心跳每 3 秒会重复推送同一份 target，值没变就别再赋值：
             // 反复设置 directoryURLs 会让 Finder 重新评估监控范围
@@ -101,48 +96,40 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
             }
         }
 
-        // 监听配置变更通知
-        DistributedNotificationCenter.default().addObserver(
-            self,
-            selector: #selector(handleConfigChanged),
-            name: NSNotification.Name(Key.configChangedNotification),
-            object: nil
-        )
+        // 扩展启动时主应用可能已经在跑了（它没机会给我们推 "running"），本地实测一次
+        isHostAppOpen = Self.hostAppIsRunning
 
-        // 向主应用发送心跳请求配置，重试直到收到响应
+        // 向主应用请求配置，重试直到收到响应
         requestConfigFromApp(retry: 0)
-
-        // 周期心跳：持续检测主应用存活，主应用崩溃/退出后能自动恢复
-        DispatchQueue.main.async { [weak self] in
-            self?.startHeartbeat()
-        }
     }
 
-    /// 周期心跳（每 3 秒）。若上一轮心跳未收到响应，则判定主应用未运行。
-    /// 这样即使主应用异常退出（未收到 quit），点击时也能按需重新拉起。
-    private func startHeartbeat() {
-        heartbeatTimer?.invalidate()
-        heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            if self.heartbeatResponsePending {
-                // 连续两次未响应（约 6 秒）才判定主应用未运行。
-                // 单次丢包（主应用正忙 / DNC 抖动）就置 false 会误报，导致点击时多余地拉起主应用。
-                self.heartbeatMissCount += 1
-                if self.heartbeatMissCount >= 2 {
-                    self.isHostAppOpen = false
-                }
-            } else {
-                self.heartbeatMissCount = 0
-            }
-            self.heartbeatResponsePending = true
-            self.messager.sendMessage(name: Key.messageFromFinder, data: MessagePayload(action: "heartbeat", target: [], rid: ""))
+    /// 主应用进程当前是否在运行（本地查询，无跨进程开销）
+    private static var hostAppIsRunning: Bool {
+        NSWorkspace.shared.runningApplications.contains { $0.bundleIdentifier == hostBundleID }
+    }
+
+    /// 主应用是否已就绪，可以安全投递消息。
+    ///
+    /// 缓存值会过期：主应用被强杀或崩溃时不会发 "quit"，标志会一直停在 true，
+    /// 消息就发进了空气里（表现为右键没反应）。所以这里用本地查询兜底校正——
+    /// 进程都不在了，就一定是 false。
+    ///
+    /// 以前靠每 3 秒一次的 DNC 心跳来维持这个标志：扩展发跨进程消息 → 主应用被唤醒 →
+    /// 读整个 plist → 所有 Data 转 base64 → 序列化成 JSON → 再发一条 DNC 回来。
+    /// 一小时 1200 轮，只为了回答「主应用还在不在」这个本地就能回答的问题。
+    /// 本地查询只在真正要发消息时（右键点击）执行一次，不需要轮询。
+    private var isHostReady: Bool {
+        if isHostAppOpen && !Self.hostAppIsRunning {
+            isHostAppOpen = false
+            logger.warning("主应用进程已消失（未收到 quit），重置存活标志")
         }
+        return isHostAppOpen
     }
 
     /// 发送消息到主应用；若主应用不在运行，先拉起再等就绪后重发。
     /// DNC 消息是"发出即忘"的，主应用未注册观察者时消息会丢失，因此必须等它就绪。
     private func sendMessageToHost(_ payload: MessagePayload) {
-        if isHostAppOpen {
+        if isHostReady {
             messager.sendMessage(name: Key.messageFromFinder, data: payload)
             return
         }
@@ -155,7 +142,7 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
                 messager.sendMessage(name: Key.messageFromFinder, data: payload)
                 return
             }
-            if isHostAppOpen {
+            if isHostReady {
                 messager.sendMessage(name: Key.messageFromFinder, data: payload)
             } else {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { retry(attempt: attempt + 1) }
@@ -166,8 +153,8 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
 
     /// 通过 bundle id 拉起主应用
     private func launchHostApp() {
-        guard let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: hostBundleID) else {
-            logger.warning("无法定位主应用 \(self.hostBundleID)")
+        guard let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: Self.hostBundleID) else {
+            logger.warning("无法定位主应用 \(Self.hostBundleID)")
             return
         }
         NSWorkspace.shared.openApplication(at: appURL, configuration: NSWorkspace.OpenConfiguration()) { _, error in
@@ -216,13 +203,6 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
         cachedMenus.removeAll()
         cachedDataVersions.removeAll()
         // tagToId/tagToPath 不清除——已显示的菜单项点击后仍需通过标签查找
-    }
-
-    /// 主应用配置变更时刷新数据并使菜单缓存失效（下次右键时懒构建，避免阻塞主 actor 触发看门狗）
-    @objc dynamic func handleConfigChanged() {
-        logger.info("收到配置变更通知，请求主应用推送最新配置")
-        // 发送 heartbeat 触发主应用推送完整配置
-        messager.sendMessage(name: Key.messageFromFinder, data: MessagePayload(action: "heartbeat", target: [], rid: ""))
     }
 
     // 内存缓存的配置版本号，避免每次右键都读 UserDefaults（热路径）

@@ -26,8 +26,6 @@ enum Key {
     static let showMenuBarExtra = "showMenuBarExtra"
     static let showInDock = "SHOW_IN_DOCK"
 
-    // 配置变更通知
-    static let configChangedNotification = "ICLICK_CONFIG_CHANGED"
     // 配置版本号，用于扩展检测变更
     static let configVersion = "ICLICK_CONFIG_VERSION"
 }
