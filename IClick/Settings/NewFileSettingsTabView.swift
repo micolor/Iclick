@@ -81,12 +81,17 @@ struct NewFileSettingsTabView: View {
                             ".pptx": "rectangle.grid.3x2", ".xlsx": "tablecells"
                         ]
                         if let icon = icon {
+                            // 这次编辑里用户明确选了图标
                             appState.newFiles[idx].icon = icon
-                        } else if let matchedIcon = defaultIcons[ext] {
-                            appState.newFiles[idx].icon = matchedIcon
-                        } else {
-                            appState.newFiles[idx].icon = "doc"
+                        } else if ext != item.ext {
+                            // 只有后缀真的改过，才跟着换默认图标。
+                            // 原实现不看后缀是否变化：icon 为 nil（= 用户没碰图标）就一律覆盖成
+                            // defaultIcons[ext]，于是「改个名字再保存」会把 icon-file-md /
+                            // icon-file-docx 这类资源图标的文件类型悄悄换成 doc.richtext、
+                            // doc.fill，菜单和列表里的图标肉眼可见地变了。
+                            appState.newFiles[idx].icon = defaultIcons[ext] ?? "doc"
                         }
+                        // 后缀没变、用户也没选新图标 → 保持原图标不动
                     } else {
                         var newItem = NewFile(ext: ext, name: name, enabled: enabled, idx: appState.newFiles.count, icon: icon ?? "doc", defaultName: defaultName)
                         newItem.openApp = openApp

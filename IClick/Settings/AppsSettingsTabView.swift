@@ -61,7 +61,10 @@ struct AppsSettingsTabView: View {
                         Label("添加", systemImage: "plus")
                     }
                     Button {
-                        appState.apps.removeAll()
+                        // 和「文件类型」那个重置保持一致：回到首次加载时的默认列表。
+                        // 原来是 removeAll()，一点就把用户加过的应用全清空、且不可恢复
+                        // （AppState.load 对空数组不会回退到默认值）。
+                        appState.apps = OpenWithApp.defaultApps
                         appState.sync()
                     } label: {
                         Label("重置", systemImage: "arrow.triangle.2.circlepath")

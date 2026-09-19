@@ -393,17 +393,44 @@ struct ActionSettingsTabView: View {
 
     private enum MoveDirection { case up, down }
 
+    /// 界面上可见的 App 在 appState.apps 里的下标。
+    /// 列表只展示 showInMainMenu 的 App，「移除」又会把 App 留在数组里只翻这个标志，
+    /// 所以可见项是全量数组的**子序列**。
+    private var visibleAppIndices: [Int] {
+        appState.apps.enumerated().compactMap { $0.element.showInMainMenu ? $0.offset : nil }
+    }
+
+    /// 界面上可见的子菜单在 appState.submenuOrder 里的下标
+    /// （buildSubmenuItem 返回 nil 的会被 menuItems 跳过，不显示）。
+    private var visibleSubmenuIndices: [Int] {
+        appState.submenuOrder.enumerated().compactMap {
+            buildSubmenuItem(id: $0.element) != nil ? $0.offset : nil
+        }
+    }
+
+    /// 把「可见列表里的上移/下移」翻译成**全量数组**中的两个下标。
+    ///
+    /// 原来直接用全量下标 ±1：只要中间夹着一个不可见的项，轻则顺序错乱
+    /// （swapAt 换到了看不见的那一项上），重则点了「上移」界面毫无变化
+    /// （换的是另一个不可见项，可见顺序不变）。
+    private func moveTargets(visibleIndices: [Int], current: Int, direction: MoveDirection) -> (Int, Int)? {
+        guard let vi = visibleIndices.firstIndex(of: current) else { return nil }
+        let ni = direction == .up ? vi - 1 : vi + 1
+        guard visibleIndices.indices.contains(ni) else { return nil }
+        return (current, visibleIndices[ni])
+    }
+
     private func canMove(item: MenuItemWrapper, direction: MoveDirection) -> Bool {
         switch item {
         case .app(let app):
-            guard let idx = appState.apps.firstIndex(where: { $0.id == app.id }) else { return false }
-            return direction == .up ? idx > 0 : idx < appState.apps.count - 1
+            guard let current = appState.apps.firstIndex(where: { $0.id == app.id }) else { return false }
+            return moveTargets(visibleIndices: visibleAppIndices, current: current, direction: direction) != nil
         case .action(let action):
             guard let idx = appState.actions.firstIndex(where: { $0.id == action.id }) else { return false }
             return direction == .up ? idx > 0 : idx < appState.actions.count - 1
         case .submenu(let id, _, _, _, _):
-            guard let idx = appState.submenuOrder.firstIndex(of: id) else { return false }
-            return direction == .up ? idx > 0 : idx < appState.submenuOrder.count - 1
+            guard let current = appState.submenuOrder.firstIndex(of: id) else { return false }
+            return moveTargets(visibleIndices: visibleSubmenuIndices, current: current, direction: direction) != nil
         }
     }
 
@@ -411,11 +438,11 @@ struct ActionSettingsTabView: View {
         let offset = direction == .up ? -1 : 1
         switch item {
         case .app(let app):
-            if let idx = appState.apps.firstIndex(where: { $0.id == app.id }) {
-                let newIdx = idx + offset
-                appState.apps.swapAt(idx, newIdx)
-                appState.sync()
-            }
+            guard let current = appState.apps.firstIndex(where: { $0.id == app.id }),
+                  let (from, to) = moveTargets(visibleIndices: visibleAppIndices, current: current, direction: direction)
+            else { return }
+            appState.apps.swapAt(from, to)
+            appState.sync()
         case .action(let action):
             if let idx = appState.actions.firstIndex(where: { $0.id == action.id }) {
                 let newIdx = idx + offset
@@ -423,10 +450,10 @@ struct ActionSettingsTabView: View {
                 appState.toggleActionItem()
             }
         case .submenu(let id, _, _, _, _):
-            if let idx = appState.submenuOrder.firstIndex(of: id) {
-                let newIdx = idx + offset
-                appState.submenuOrder.swapAt(idx, newIdx)
-            }
+            guard let current = appState.submenuOrder.firstIndex(of: id),
+                  let (from, to) = moveTargets(visibleIndices: visibleSubmenuIndices, current: current, direction: direction)
+            else { return }
+            appState.submenuOrder.swapAt(from, to)
         }
     }
 

@@ -43,7 +43,29 @@ public class Utils {
         return limitedComponents.joined(separator: "/")
     }
 
-    /// 从 NSOpenPanel 选择图片并复制到应用自定义图标目录，返回目标路径
+    /// 自定义图标的存放目录。
+    ///
+    /// 必须落在 **App Group 容器**里。FinderSync 扩展是沙盒进程，读不到
+    /// `~/Library/Application Support`（那是主应用的真实路径，不是它的容器），
+    /// 图标存在那儿时扩展里的 `NSImage(contentsOfFile:)` 恒为 nil ——
+    /// 表现是设置界面里图标正常、Finder 右键菜单里静默变回系统图标。
+    /// 扩展的 entitlements 里已经有 group.33WRMMC62L.cn.anwen.IClick 的访问权限。
+    ///
+    /// `containerURL(forSecurityApplicationGroupIdentifier:)` 在这里不能用：主应用**没有**
+    /// 沙盒，也就没有该 entitlement，这个 API 会返回 nil，所以直接拼标准路径。
+    static var customIconsDir: URL {
+        let groupDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Group Containers")
+            .appendingPathComponent(Constants.suitName)
+        if FileManager.default.fileExists(atPath: groupDir.path) {
+            return groupDir.appendingPathComponent("CustomIcons")
+        }
+        // 容器不存在（异常情况）时退回原位置：至少不比改动前更差
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        return appSupport.appendingPathComponent("CustomIcons")
+    }
+
+    /// 从 NSOpenPanel 选择图片并复制到自定义图标目录，返回目标路径
     @MainActor
     @discardableResult
     static func pickAndCopyIcon() -> String? {
@@ -54,8 +76,7 @@ public class Utils {
         panel.canChooseDirectories = false
         guard panel.runModal() == .OK, let url = panel.url else { return nil }
 
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let iconsDir = appSupport.appendingPathComponent("CustomIcons")
+        let iconsDir = customIconsDir
         try? FileManager.default.createDirectory(at: iconsDir, withIntermediateDirectories: true)
         let dest = iconsDir.appendingPathComponent(url.lastPathComponent)
         try? FileManager.default.removeItem(at: dest)

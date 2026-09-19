@@ -59,10 +59,10 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
         FIFinderSyncController.default().directoryURLs = [myFolderURL]
         logger.info("FinderSync launched from \(Bundle.main.bundlePath, privacy: .public)")
 
-        messager.on(name: "quit") { [weak self] _ in
+        messager.on(name: Key.hostQuit) { [weak self] _ in
             self?.isHostAppOpen = false
         }
-        messager.on(name: "running") { [weak self] payload in
+        messager.on(name: Key.hostRunning) { [weak self] payload in
             guard let self else { return }
 
             // 接收主应用推送的配置数据

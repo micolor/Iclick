@@ -16,7 +16,14 @@ private let logger = Logger(subsystem: subsystem, category: "user_defaults")
 
 enum Key {
     static let messageFromFinder = "ICLICK_FINDER_Main"
-    static let messageFromMain = "ICLICK_MAIN_FINDER"
+
+    // 主应用 → 扩展。
+    // DistributedNotificationCenter 是全局命名空间且不校验发送方，裸名（"running" / "quit"）
+    // 本机任意进程都能伪造：收到伪造的 "running" 会让扩展覆盖配置快照并直接改写
+    // 监控目录，"quit" 则会让它误判主应用不在、反复去拉起。统一带前缀收窄一下。
+    // （原 messageFromMain = "ICLICK_MAIN_FINDER" 是从未被使用的死常量，已删。）
+    static let hostRunning = "ICLICK_MAIN_Running"
+    static let hostQuit = "ICLICK_MAIN_Quit"
 
     static let apps = "ICLICK_APPs"
     static let actions = "ICLICK_ACTIONS"

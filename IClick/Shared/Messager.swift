@@ -16,6 +16,41 @@ struct MessagePayload: Codable {
     /// 配置同步：主应用序列化所有设置数据为 JSON 字符串
     var configJSON: String?
 
+    init(
+        action: String = "",
+        target: [String] = [],
+        rid: String = "",
+        trigger: String = "",
+        configJSON: String? = nil
+    ) {
+        self.action = action
+        self.target = target
+        self.rid = rid
+        self.trigger = trigger
+        self.configJSON = configJSON
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case action, target, rid, trigger, configJSON
+    }
+
+    /// 手写解码，让上面的属性默认值真正生效。
+    ///
+    /// Swift 合成的 `init(from:)` **不会**使用属性默认值：缺任何一个 key 都会抛
+    /// keyNotFound，而 `Messager.reconstructEntry` 把异常吞掉后返回一个全空载荷，
+    /// 于是整条消息连同已经正确解出的字段一起被丢弃，只留一条 warning。
+    /// （已用编译探针实测确认：`{"action":"open"}` 在合成版本下解码返回 nil。）
+    /// 以后任何一边新增字段而另一边没跟上，现象就是「点了没反应」。
+    /// 改成 decodeIfPresent + 默认值后，缺 key 只影响该字段本身。
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        action = try container.decodeIfPresent(String.self, forKey: .action) ?? ""
+        target = try container.decodeIfPresent([String].self, forKey: .target) ?? []
+        rid = try container.decodeIfPresent(String.self, forKey: .rid) ?? ""
+        trigger = try container.decodeIfPresent(String.self, forKey: .trigger) ?? ""
+        configJSON = try container.decodeIfPresent(String.self, forKey: .configJSON)
+    }
+
     public var description: String {
         return "MessagePayload(action: \(action), target: \(target), rid:\(rid), trigger: \(trigger), hasConfig: \(configJSON != nil))"
     }

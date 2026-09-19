@@ -144,6 +144,13 @@ class AppState: ObservableObject {
 
     @MainActor func addApp(item: OpenWithApp) {
         logger.info("start add app")
+        // 同一个 App 加两次，右键菜单里就会出现两条一模一样的「打开方式」，
+        // 用户只能靠肉眼比对再删一条。这里直接忽略重复项。
+        let newPath = item.url.standardizedFileURL.path
+        guard !apps.contains(where: { $0.url.standardizedFileURL.path == newPath }) else {
+            logger.info("add app skipped: \(newPath) 已在列表中")
+            return
+        }
         apps.append(item)
         
         do {
@@ -248,7 +255,7 @@ class AppState: ObservableObject {
         return dirs.contains { existingDir in
             let existingPath = normalizePath(existingDir.url.path)
             // 已有目录是新目录的父路径（且不是同一个路径）
-            return existingPath != path && path.hasPrefix(existingPath)
+            return isStrictlyInside(path, existingPath)
         }
     }
 
@@ -258,8 +265,15 @@ class AppState: ObservableObject {
         dirs.removeAll { existingDir in
             let existingPath = normalizePath(existingDir.url.path)
             // 新目录是已有目录的父路径（且不是同一个路径）
-            return existingPath != newPath && existingPath.hasPrefix(newPath)
+            return isStrictlyInside(existingPath, newPath)
         }
+    }
+
+    /// path 是否严格位于 dir 之内（带分隔符边界，且不含 dir 自身）。
+    /// 原实现是裸 `path.hasPrefix(dir)`："/Users/a/bc" 会被判成 "/Users/a/b" 的子项。
+    /// 写法与 IClickApp.swift 里同一判断保持一致，避免两处日后漂移。
+    private func isStrictlyInside(_ path: String, _ dir: String) -> Bool {
+        path != dir && path.hasPrefix(dir + "/")
     }
 
     /// 标准化路径（移除末尾斜杠）
@@ -357,7 +371,7 @@ class AppState: ObservableObject {
         let configJSON: String? = (try? JSONSerialization.data(withJSONObject: allConfig, options: .fragmentsAllowed))
             .flatMap { String(data: $0, encoding: .utf8) }
         Messager.shared.sendMessage(
-            name: "running",
+            name: Key.hostRunning,
             data: MessagePayload(action: "running", target: ["/"], configJSON: configJSON)
         )
     }

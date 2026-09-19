@@ -280,7 +280,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 try? self.appState.savePermissiveDir()
 
                 // 主应用无沙盒，始终观察整个文件系统
-                self.messager.sendMessage(name: "running", data: self.buildRunningPayload(target: ["/"]))
+                self.messager.sendMessage(name: Key.hostRunning, data: self.buildRunningPayload(target: ["/"]))
                 self.logger.info("已注册目录: \(path)")
                 completion?(true)
             } else {
@@ -313,7 +313,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// 单次「running」消息：主应用无沙盒，始终观察整个文件系统
     private func sendRunningMessage() {
-        messager.sendMessage(name: "running", data: buildRunningPayload(target: ["/"]))
+        messager.sendMessage(name: Key.hostRunning, data: buildRunningPayload(target: ["/"]))
     }
 
     /// 推送配置，未收到心跳时每 3 秒重试，最多 5 次
@@ -802,7 +802,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         let decodedDir = dirPath.removingPercentEncoding ?? dirPath
-        _ = doCreateFile(in: URL(fileURLWithPath: decodedDir), rcitem: rcitem, ext: rcitem.ext)
+
+        // 右键「选中文件」时走的是 .contextualMenuForItems，target 拿到的是那个文件本身。
+        // 直接当目录用会拼出 /path/a.txt/未命名.txt，copyItem/write 抛 ENOTDIR，
+        // 而返回值又被调用方丢弃 —— 界面上毫无反馈，文件就是没建出来。
+        // 非目录时退到它所在的目录，与 pasteFromClipboard 对文件的处理保持一致。
+        var dirURL = URL(fileURLWithPath: decodedDir)
+        var isDirectory: ObjCBool = false
+        if FileManager.default.fileExists(atPath: dirURL.path, isDirectory: &isDirectory), !isDirectory.boolValue {
+            dirURL = dirURL.deletingLastPathComponent()
+        }
+
+        _ = doCreateFile(in: dirURL, rcitem: rcitem, ext: rcitem.ext)
     }
 
     /// 在指定目录中创建文件
@@ -956,7 +967,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        messager.sendMessage(name: "quit", data: MessagePayload(action: "quit", target: [], trigger: "unknown"))
+        messager.sendMessage(name: Key.hostQuit, data: MessagePayload(action: "quit", target: [], trigger: "unknown"))
         logger.info("applicationWillTerminate")
     }
 
