@@ -545,15 +545,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// 复制路径到剪贴板。
     ///
-    /// 多选时复制**全部**路径，每行一条 —— 与「剪切」的写法（joined(separator: "\n")）一致。
-    /// 原来只取 `target.first`，选中 3 个文件时后 2 个被静默丢掉；
-    /// 单选时输出与原来逐字节相同（单个元素的 joined 就是它自己）。
+    /// 多选时**只复制第一个**路径，这是有意为之（2026-09-19 与用户确认过）。
+    /// 看起来像漏了 `joined(separator:)`，但「剪切」那边多选拼全部、这边只取一条，
+    /// 是两套刻意区分的行为 —— 别再当成 bug 改成复制全部。
     func copyPath(_ target: [String]) {
-        let paths = target.map { $0.removingPercentEncoding ?? $0 }
-        guard !paths.isEmpty else { return }
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        pasteboard.setString(paths.joined(separator: "\n"), forType: .string)
+        if let dirPath = target.first {
+            let pasteboard = NSPasteboard.general
+            pasteboard.clearContents()
+            pasteboard.setString(dirPath.removingPercentEncoding ?? dirPath, forType: .string)
+        }
     }
 
     /// 剪切文件：将选中文件路径存入剪切板，等待粘贴
