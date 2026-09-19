@@ -11,9 +11,7 @@ import SwiftUI
 
 struct AboutSettingsTabView: View {
     let messager = Messager.shared
-    #if !APP_STORE
     @EnvironmentObject var updateManager: UpdateManager
-    #endif
 
     var body: some View {
         VStack(spacing: 0) {
@@ -52,7 +50,6 @@ struct AboutSettingsTabView: View {
 
             Divider()
 
-            #if !APP_STORE
             // Check for Updates
             Button {
                 Task {
@@ -65,7 +62,6 @@ struct AboutSettingsTabView: View {
             .buttonStyle(.borderless)
             .foregroundStyle(.secondary)
             .padding(.vertical, 16)
-            #endif
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(NSColor.windowBackgroundColor))

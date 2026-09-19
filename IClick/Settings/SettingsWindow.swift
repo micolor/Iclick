@@ -10,9 +10,7 @@ import SwiftUI
 struct SettingsWindow: Scene {
     @ObservedObject var appState: AppState
 
-    #if !APP_STORE
     @EnvironmentObject var updateManager: UpdateManager
-    #endif
 
     let onAppear: () -> Void
 
@@ -24,11 +22,9 @@ struct SettingsWindow: Scene {
                     onAppear()
                 }
                 .frame(minWidth: 800, minHeight: 500)
-                #if !APP_STORE
                 .sheet(isPresented: $updateManager.showUpdateSheet) {
                     UpdateView(updateManager: updateManager)
                 }
-                #endif
         }
         .windowResizability(.contentSize)
         .defaultSize(width: 800, height: 500)

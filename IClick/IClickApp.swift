@@ -26,20 +26,16 @@ struct IClickApp: App {
 
     @StateObject var appState = AppState.shared
 
-    #if !APP_STORE
     @StateObject private var updateManager = UpdateManager(
         owner: "anwen",
         repo: "IClick",
         currentVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.0"
     )
-    #endif
 
     var body: some Scene {
         SettingsWindow(appState: appState, onAppear: {})
             .defaultAppStorage(UserDefaults.group)
-            #if !APP_STORE
             .environmentObject(updateManager)
-            #endif
 
         // showMenuBarExtra 为 true 时显示菜单条
         MenuBarExtra(

@@ -5,8 +5,6 @@
 //  Created by 李旭 on 2025/9/21.
 //
 
-#if !APP_STORE
-
 import CryptoKit
 import Foundation
 import Security
@@ -570,5 +568,3 @@ class UpdateManager: ObservableObject {
         }
     }
 }
-
-#endif
