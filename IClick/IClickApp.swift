@@ -54,14 +54,25 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var appState: AppState = .shared
     private var isProcessingDelete = false
 
-    /// 最后一次收到扩展心跳的时间。扩展每 3 秒发一次心跳，
-    /// 超过 10 秒没收到即视为扩展已退出 —— 之前这个标志只置 true、从不回退，
-    /// 扩展重启后主应用会一直误以为它还在运行，于是不再重试推送配置。
-    private var lastHeartbeat: Date?
+    /// 扩展进程的 bundle id（扩展是独立进程，可以用本地查询判断存活）
+    private static let extensionBundleID = "cn.anwen.IClick.FinderSyncExt"
 
+    /// 扩展进程当前是否在运行。
+    ///
+    /// 这里原本判断的是「最后一次收到扩展心跳是否在 10 秒内」。但扩展现在只在
+    /// 启动握手时发心跳（`requestConfigFromApp` 一旦拿到配置就停），所以主应用
+    /// 启动超过 10 秒后这个判断恒为 false —— 于是每次启动主应用，
+    /// `deliverRunningWithRetry` 都会跑满 5 次重试、把同一份完整配置白发 6 遍
+    /// （约 25KB），最后再打一条「配置推送重试已达上限」的 error。
+    /// 统一日志实测每次启动必现（5 次启动 5 条，PID 各不相同）。
+    ///
+    /// 改成直接查进程：主应用无沙盒，`runningApplications` 能看到扩展进程。
+    /// 这样「扩展还没起来就重试」的原意得以保留，扩展已在跑时则一次即达。
+    ///
+    /// 注意别换回通知式的判断：本机 NSWorkspace 的启动/退出通知从不触发，
+    /// 只有这个即时查询是可靠的（扩展那边也用同一招）。
     var pluginRunning: Bool {
-        guard let lastHeartbeat else { return false }
-        return Date().timeIntervalSince(lastHeartbeat) < 10
+        NSWorkspace.shared.runningApplications.contains { $0.bundleIdentifier == Self.extensionBundleID }
     }
 
     let messager = Messager.shared
@@ -124,7 +135,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             case "common-dirs":
                 self.openCommonDirs(target: payload.target)
             case "heartbeat":
-                self.lastHeartbeat = Date()
                 // 响应时发送完整配置数据，确保扩展有最新设置
                 self.sendConfigToExtension()
             case "authorize-dir":
