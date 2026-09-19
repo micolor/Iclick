@@ -419,6 +419,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
         } else {
             guard let dirPath = decodedTarget.first else { return }
+            // 容器菜单（在文件夹空白处右键）走的是这条分支：会批量改该目录下
+            // **所有**子项的 hidden 标志。上面 ctx-items 分支拦了受保护路径，这里漏了——
+            // 对 /Applications 这类目录执行，Finder 里看起来就像被清空了。
+            // 注：unhide 有意不加这道拦截，它是「误隐藏」之后的恢复路径，
+            // 拦掉反而会把人困住。
+            if Utils.isProtectedFolder(dirPath) {
+                logger.warning("跳过受保护的目录路径: \(dirPath)")
+                return
+            }
             self.setDirContentsHidden(dirPath: dirPath, hidden: true)
         }
         logger.info("隐藏操作完成")
@@ -434,18 +443,33 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// 使用 FileManager 设置目录内容的隐藏状态
     private func setDirContentsResourceValuesHidden(dir: URL, hidden: Bool) -> Bool {
+        let contents: [URL]
         do {
-            let contents = try FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil, options: [.skipsPackageDescendants])
-            for case var fileURL in contents {
-                var values = URLResourceValues()
-                values.isHidden = hidden
-                try fileURL.setResourceValues(values)
-            }
-            return true
+            contents = try FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil, options: [.skipsPackageDescendants])
         } catch {
-            logger.debug("setResourceValues 目录内容失败: \(dir.path), error: \(error.localizedDescription)")
+            logger.warning("读取目录内容失败: \(dir.path), error: \(error.localizedDescription)")
             return false
         }
+
+        // 每个条目单独 try。原先 `try` 在循环内、`catch` 在循环外，第一项失败
+        // （只读卷、或对该目录没有写权限——设置 hidden 标志需要父目录的写权限）
+        // 就会中止整个循环，后面的条目一个都不处理；而且失败只打 .debug
+        // （默认不落盘），用户看到的就是「点了没反应」。现在逐项兜住并汇报失败数。
+        var failed = 0
+        for case var fileURL in contents {
+            var values = URLResourceValues()
+            values.isHidden = hidden
+            do {
+                try fileURL.setResourceValues(values)
+            } catch {
+                failed += 1
+            }
+        }
+        if failed > 0 {
+            logger.warning("目录内容设置失败 \(failed)/\(contents.count) 项: \(dir.path)")
+            return false
+        }
+        return true
     }
 
     /// 设置单个文件/目录的隐藏状态

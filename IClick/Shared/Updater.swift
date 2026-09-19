@@ -134,6 +134,9 @@ class UpdateManager: ObservableObject {
     @Published var downloadProgress: Double = 0
     @Published var showUpdateSheet = false
 
+    @AppLog(category: "Updater")
+    private var logger
+
     private let githubChecker: GitHubReleaseChecker
     private let preferences: UpdatePreferences
     private let currentVersion: String
@@ -508,10 +511,19 @@ class UpdateManager: ObservableObject {
         let newAppURL = applicationsURL.appendingPathComponent("\(currentAppName).app")
 
         let configuration = NSWorkspace.OpenConfiguration()
+        // 必须显式要求新实例。此刻旧实例还在运行，两者 bundle id 相同，
+        // 默认值 false 会让 LaunchServices 只去「激活已运行的那个」——也就是我们自己；
+        // 紧接着的 terminate 再把自己杀掉，净效果就是「退出但不重启」，
+        // 新版本从没被启动过，菜单栏图标消失且无人接手。
+        configuration.createsNewApplicationInstance = true
         NSWorkspace.shared.openApplication(at: newAppURL, configuration: configuration) { _, error in
-            if error != nil {
-            }
             Task { @MainActor in
+                if let error {
+                    // 新实例没起来就退出的话，用户只会看到图标消失、还得手动再开一次。
+                    // 留在当前实例里至少是可用的，所以这里不退。
+                    self.logger.error("启动新版本失败，保持当前实例运行: \(error.localizedDescription)")
+                    return
+                }
                 NSApp.terminate(nil)
             }
         }
