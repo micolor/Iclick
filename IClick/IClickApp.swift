@@ -109,6 +109,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             NSApp.setActivationPolicy(.accessory)
         }
 
+        // 常驻：无窗口的进程会被 macOS 的自动终止（automatic termination）回收，
+        // 于是又退回「每次右键冷启动一次」的老路。主应用是 Finder 扩展的后端，
+        // 必须一直活着，显式关掉自动终止。
+        // 与 applicationShouldTerminateAfterLastWindowClosed 返回 false 是两件事：
+        // 那个只管「关掉最后一个窗口」，这个管「系统在空闲时把无窗口进程收走」。
+        ProcessInfo.processInfo.disableAutomaticTermination("IClick 需要常驻以服务 Finder 扩展")
+
         // 通知权限：UserNotifications 必须显式授权，否则投递会被静默丢弃。
         // 只在启动时请求一次，系统自身会记住用户的决定。
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, error in
@@ -962,8 +969,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return url
     }
 
+    /// 关闭设置窗口不再退出应用。
+    ///
+    /// 原来返回 true。它的后果不只是「关窗就退出」：应用一旦不在运行，扩展每次
+    /// 右键点击都得把它冷启动一次。统一日志实测（2026-09-23 21:42）：30 秒内被拉起
+    /// 三次（PID 99506/99509/99517），每次干完活 1~3 秒又自己消失，下一次点击
+    /// 扩展再拉一次 —— 用户看到的就是「每点一次右键，应用的界面就弹出来一次」。
+    ///
+    /// 主应用必须常驻：它是 Finder 扩展的后端，扩展只在它活着时才有得可问
+    /// （见 FinderSyncExt.isHostReady —— 标志为 false 时走 launchHostApp + 重试）。
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        return true
+        return false
     }
 
     func applicationWillTerminate(_ notification: Notification) {
