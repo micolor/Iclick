@@ -10,8 +10,12 @@ import FinderSync
 import SwiftUI
 
 struct GeneralSettingsTabView: View {
-    @AppStorage("extensionEnabled") private var extensionEnabled = false
-    @AppStorage(Key.showMenuBarExtra) private var showMenuBarExtra = true
+    // 必须显式指定 store：`.defaultAppStorage(UserDefaults.group)` 只加在 Scene 上时，
+    // 这里的 @AppStorage 仍会落到 UserDefaults.standard（实测 onAppear 写出的
+    // extensionEnabled 进了 standard），而菜单栏图标的 MenuBarExtra 读的是 group。
+    // 两边不是同一个 store → 设置里把「在菜单栏显示」打开也不生效。
+    @AppStorage("extensionEnabled", store: UserDefaults.group) private var extensionEnabled = false
+    @AppStorage(Key.showMenuBarExtra, store: UserDefaults.group) private var showMenuBarExtra = true
     /// 与 IClickApp 启动时读取的是同一份存储（SharedSettings plist）。
     /// 之前这里用 @AppStorage 写 UserDefaults.standard，而 AppDelegate 读的是 plist，
     /// 两者不通 → 开关状态在下次启动时丢失。

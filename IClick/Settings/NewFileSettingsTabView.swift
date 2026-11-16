@@ -67,7 +67,7 @@ struct NewFileSettingsTabView: View {
         .sheet(item: $editingItem) { item in
             NewFileEditSheet(item: item) { result in
                 switch result {
-                case .save(let name, let ext, let enabled, let defaultName, let openApp, let icon):
+                case .save(let name, let ext, let enabled, let defaultName, let openApp, let icon, let resetIcon):
                     if let idx = appState.newFiles.firstIndex(where: { $0.id == item.id }) {
                         appState.newFiles[idx].name = name
                         appState.newFiles[idx].ext = ext
@@ -80,7 +80,12 @@ struct NewFileSettingsTabView: View {
                             ".md": "doc.richtext", ".docx": "doc.fill",
                             ".pptx": "rectangle.grid.3x2", ".xlsx": "tablecells"
                         ]
-                        if let icon = icon {
+                        if resetIcon {
+                            // 用户明确点了「重置图标」：回到按后缀匹配的默认图标。
+                            // 不能只看 icon == nil —— 那和「这次没碰图标」无法区分，
+                            // 重置按钮会变成一个什么都不做的开关。
+                            appState.newFiles[idx].icon = defaultIcons[ext] ?? "doc"
+                        } else if let icon = icon {
                             // 这次编辑里用户明确选了图标
                             appState.newFiles[idx].icon = icon
                         } else if ext != item.ext {
@@ -107,7 +112,7 @@ struct NewFileSettingsTabView: View {
         .sheet(isPresented: $isAdding) {
             NewFileEditSheet(item: nil) { result in
                 switch result {
-                case .save(let name, let ext, let enabled, let defaultName, let openApp, let icon):
+                case .save(let name, let ext, let enabled, let defaultName, let openApp, let icon, _):
                     var newItem = NewFile(ext: ext, name: name, enabled: enabled, idx: appState.newFiles.count, icon: icon ?? "doc", defaultName: defaultName)
                     newItem.openApp = openApp
                     appState.newFiles.append(newItem)
@@ -292,7 +297,7 @@ struct NewFileDropDelegate: DropDelegate {
 // MARK: - 编辑 Sheet
 
 enum EditSheetResult {
-    case save(name: String, ext: String, enabled: Bool, defaultName: String, openApp: URL?, icon: String?)
+    case save(name: String, ext: String, enabled: Bool, defaultName: String, openApp: URL?, icon: String?, resetIcon: Bool)
     case cancel
 }
 
@@ -305,6 +310,9 @@ struct NewFileEditSheet: View {
     @State private var defaultName: String = "未命名"
     @State private var openApp: URL?
     @State private var iconPath: String?
+    /// 用户点了「重置图标」。单靠 iconPath = nil 无法和「这次没碰图标」区分，
+    /// 父层会继续保留自定义图标，按钮看起来就是没反应。
+    @State private var iconReset = false
     @State private var showIconPicker = false
 
     private var isAdding: Bool { item == nil }
@@ -359,6 +367,7 @@ struct NewFileEditSheet: View {
                     if !isAdding {
                         Button {
                             iconPath = nil
+                            iconReset = true
                         } label: {
                             Image(systemName: "arrow.counterclockwise")
                         }
@@ -367,6 +376,7 @@ struct NewFileEditSheet: View {
                         Button {
                             if let path = Utils.pickAndCopyIcon() {
                                 iconPath = path
+                                iconReset = false
                             }
                         } label: {
                             Image(systemName: "plus.circle")
@@ -403,12 +413,12 @@ struct NewFileEditSheet: View {
                     Text("打开应用:")
                         .frame(width: 75, alignment: .trailing)
                     Button("选择") {
-                        let panel = NSOpenPanel()
-                        panel.title = "选择应用"
-                        panel.allowedContentTypes = [.application]
-                        panel.allowsMultipleSelection = false
-                        panel.canChooseDirectories = false
-                        if panel.runModal() == .OK, let url = panel.url {
+                        if let url = Utils.runOpenPanel({ panel in
+                            panel.title = "选择应用"
+                            panel.allowedContentTypes = [.application]
+                            panel.allowsMultipleSelection = false
+                            panel.canChooseDirectories = false
+                        }) {
                             openApp = url
                         }
                     }
@@ -448,7 +458,8 @@ struct NewFileEditSheet: View {
                         enabled: item?.enabled ?? true,
                         defaultName: defaultName.trimmingCharacters(in: .whitespaces).isEmpty ? "未命名" : defaultName,
                         openApp: openApp,
-                        icon: iconPath
+                        icon: iconPath,
+                        resetIcon: iconReset
                     ))
                 }
                 .buttonStyle(.borderedProminent)
@@ -462,7 +473,9 @@ struct NewFileEditSheet: View {
         .onAppear {
             if let item = item {
                 name = item.name
-                ext = item.ext.replacingOccurrences(of: ".", with: "")
+                // 只去掉开头的一个点。用 replacingOccurrences 会把 ".tar.gz" 变成
+                // "targz"，保存后后缀被永久改坏（用户只是打开编辑再点保存也会中招）。
+                ext = item.ext.hasPrefix(".") ? String(item.ext.dropFirst()) : item.ext
                 defaultName = item.defaultName
                 openApp = item.openApp
                 if !item.icon.contains("icon-file-") && !item.icon.contains("document") {
@@ -474,7 +487,10 @@ struct NewFileEditSheet: View {
             IconPickerSheet(
                 selectedIcon: Binding(
                     get: { iconPath ?? "" },
-                    set: { iconPath = $0.isEmpty ? nil : $0 }
+                    set: { newValue in
+                        iconPath = newValue.isEmpty ? nil : newValue
+                        if !newValue.isEmpty { iconReset = false }
+                    }
                 ),
                 onDismiss: { showIconPicker = false }
             )

@@ -34,7 +34,12 @@ struct SettingsWindow: Scene {
         // 这正是「右键点一下菜单项，管理界面就弹出来」的原因（2026-09-23 实测：
         // 冷启动后 1~12 秒窗口数稳定为 1，加 -ApplePersistenceIgnoreState YES 仍是 1，
         // 排除窗口状态恢复）。suppressed 只影响「启动时自动呈现」，
-        // 菜单栏里的 openWindow(id:) 照常能打开。
+        // openWindow(id:) 照常能打开。
+        //
+        // 「用户自己双击应用 / 重开应用」的入口由 AppDelegate 负责：
+        // didFinishLaunching（非扩展拉起、非登录项）和 applicationShouldHandleReopen
+        // 会触发 SettingsCommands 里那条 Cmd+, 菜单项来打开本窗口。没有这一步，
+        // 菜单栏图标一旦被关掉，suppressed 会让应用彻底失去入口。
         .defaultLaunchBehavior(.suppressed)
     }
 

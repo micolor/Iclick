@@ -151,13 +151,41 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
         retry(attempt: 0)
     }
 
-    /// 通过 bundle id 拉起主应用
+    /// 拉起主应用。
+    ///
+    /// 用扩展自己所在的 .app，而不是按 bundle id 问 LaunchServices：旧构建
+    /// （DerivedData 里的副本、之前注册过的 xcarchive）可能同样带着这个 bundle id，
+    /// 查到的未必是「带这个扩展的 /Applications 副本」。拉起一个旧副本会让同一份
+    /// SharedSettings.plist 和右键菜单变成两个不一致的世界——菜单里有、点了没反应。
     private func launchHostApp() {
-        guard let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: Self.hostBundleID) else {
-            logger.warning("无法定位主应用 \(Self.hostBundleID)")
+        // 进程已经在跑就别再 open：对运行中的应用再 open 会触发 reopen，
+        // 主应用会把设置窗口弹出来（又退回「点一下菜单，界面就冒出来」）。
+        // 这里直接返回，下面的重试循环会等它把自己的 "running" 消息推过来。
+        if Self.hostAppIsRunning {
+            logger.debug("主应用进程已在运行，跳过拉起")
             return
         }
-        NSWorkspace.shared.openApplication(at: appURL, configuration: NSWorkspace.OpenConfiguration()) { _, error in
+
+        // FinderSyncExt.appex → PlugIns → Contents → Iclick.app
+        var appURL = Bundle.main.bundleURL
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+
+        if !FileManager.default.fileExists(atPath: appURL.path) {
+            logger.warning("扩展所在 bundle 里找不到主应用，退回按 bundle id 查找")
+            guard let found = NSWorkspace.shared.urlForApplication(withBundleIdentifier: Self.hostBundleID) else {
+                logger.warning("无法定位主应用 \(Self.hostBundleID)")
+                return
+            }
+            appURL = found
+        }
+
+        let configuration = NSWorkspace.OpenConfiguration()
+        // 告诉主应用这次是扩展拉起的：它不应该把设置窗口弹到用户面前。
+        configuration.arguments = ["--launched-by-extension"]
+
+        NSWorkspace.shared.openApplication(at: appURL, configuration: configuration) { _, error in
             if let error {
                 logger.error("拉起主应用失败: \(error.localizedDescription)")
             }
@@ -250,7 +278,11 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
     }
 
     override var toolbarItemImage: NSImage {
-        return NSImage(named: "toolbar")!
+        // 不要强解包：资源缺失（手工构建漏拷 Assets.car 的将来某次）会让扩展在这里
+        // 崩溃，表现为 Finder 工具栏空白、右键菜单也没有，且只留下难查的崩溃日志。
+        return NSImage(named: "toolbar")
+            ?? NSImage(systemSymbolName: "cursorarrow.click", accessibilityDescription: "Iclick")
+            ?? NSImage(size: NSSize(width: 16, height: 16))
     }
 
     override func menu(for menuKind: FIMenuKind) -> NSMenu {
@@ -357,7 +389,8 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
         }
 
         let submenuItem: NSMenuItem?
-        if !submenuApps.isEmpty {
+        // 设置里的「常用 App」子菜单开关（原来那个开关是死的，扩展无条件显示）
+        if !submenuApps.isEmpty && appState.showApps {
             let submenuMenuItem = NSMenuItem()
             submenuMenuItem.title = submenuTitle("submenuApps", fallback: String(localized: "Favorite Apps"))
             if let custom = submenuCustomIcon("submenuApps") {
@@ -498,7 +531,11 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
         case .contextualMenuForItems:
             hasSelection = true
         case .toolbarItemMenu:
-            hasSelection = !(FIFinderSyncController.default().selectedItemURLs()?.isEmpty ?? true)
+            // macOS 15 上 selectedItemURLs() 在回调里可能返回 nil；菜单构建时
+            // 缓存的值（cachedSelectedURLs）才是可靠的。否则「要求选中文件」的操作
+            // 明明有选中项也会被藏掉，而 getTargets 却又拿得到路径。
+            let urls = FIFinderSyncController.default().selectedItemURLs() ?? cachedSelectedURLs
+            hasSelection = !(urls?.isEmpty ?? true)
         default:
             hasSelection = false
         }

@@ -53,7 +53,10 @@ struct AboutSettingsTabView: View {
             // Check for Updates
             Button {
                 Task {
-                    await updateManager.checkForUpdates()
+                    // 用户手动点「检查更新」时忽略「忽略此版本」列表：
+                    // 否则点过一次忽略之后，手动检查也永远看不到那个版本，
+                    // 界面上还会错误地显示「您使用的就是最新版」。
+                    await updateManager.checkForUpdates(force: true)
                 }
             } label: {
                 Label("检查更新", systemImage: "arrow.triangle.2.circlepath")

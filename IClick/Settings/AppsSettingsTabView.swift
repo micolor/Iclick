@@ -49,12 +49,12 @@ struct AppsSettingsTabView: View {
                     Text("常用 App")
                     Spacer()
                     Button {
-                        let panel = NSOpenPanel()
-                        panel.title = "选择应用"
-                        panel.allowedContentTypes = [.application]
-                        panel.allowsMultipleSelection = false
-                        panel.canChooseDirectories = false
-                        if panel.runModal() == .OK, let url = panel.url {
+                        if let url = Utils.runOpenPanel({ panel in
+                            panel.title = "选择应用"
+                            panel.allowedContentTypes = [.application]
+                            panel.allowsMultipleSelection = false
+                            panel.canChooseDirectories = false
+                        }) {
                             appState.addApp(item: OpenWithApp(appURL: url))
                         }
                     } label: {
@@ -316,20 +316,21 @@ struct AppEditSheet: View {
                     Spacer()
 
                     Button {
+                        // 只重置图标。原来这里还顺手把 appURL 改回 item.url，
+                        // 用户先点「+」换了 App、再点这个箭头，新选的 App 就被悄悄撤销了。
                         appIcon = ""
-                        appURL = item.url
                     } label: {
                         Image(systemName: "arrow.counterclockwise")
                     }
                     .buttonStyle(.borderless)
 
                     Button {
-                        let panel = NSOpenPanel()
-                        panel.title = "选择应用"
-                        panel.allowedContentTypes = [.application]
-                        panel.allowsMultipleSelection = false
-                        panel.canChooseDirectories = false
-                        if panel.runModal() == .OK, let url = panel.url {
+                        if let url = Utils.runOpenPanel({ panel in
+                            panel.title = "选择应用"
+                            panel.allowedContentTypes = [.application]
+                            panel.allowsMultipleSelection = false
+                            panel.canChooseDirectories = false
+                        }) {
                             appURL = url
                             appIcon = ""
                         }

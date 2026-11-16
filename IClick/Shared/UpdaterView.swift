@@ -21,10 +21,12 @@ struct UpdateView: View {
                 checkingView
             } else if updateManager.isDownloading {
                 downloadingView
+            } else if let error = updateManager.updateError {
+                // 错误优先于 availableUpdate：下载/安装失败时 availableUpdate 仍在，
+                // 原来的顺序会一直显示「发现新版本」，用户永远看不到失败原因。
+                errorView(error)
             } else if let release = updateManager.availableUpdate {
                 updateAvailableView(release)
-            } else if let error = updateManager.updateError {
-                errorView(error)
             } else {
                 noUpdateView
             }
@@ -140,7 +142,7 @@ struct UpdateView: View {
             )
 
             ScrollView {
-                Text(release.body)
+                Text(release.body ?? "")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .padding(10)

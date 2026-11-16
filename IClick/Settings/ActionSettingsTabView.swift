@@ -140,7 +140,9 @@ struct ActionSettingsTabView: View {
             return .submenu(id: "newFiles", name: submenuName(for: "newFiles"), icon: submenuIcon(for: "newFiles"), iconColor: .blue, enabled: appState.showNewFiles)
         case "submenuApps":
             guard hasSubmenuApps else { return nil }
-            return .submenu(id: "submenuApps", name: submenuName(for: "submenuApps"), icon: submenuIcon(for: "submenuApps"), iconColor: .purple, enabled: hasSubmenuApps)
+            // 原来这里写的是 hasSubmenuApps（恒为 true），开关永远显示为开、
+            // 点击也没有任何持久化 —— 典型「点了没反应」。改用真实开关。
+            return .submenu(id: "submenuApps", name: submenuName(for: "submenuApps"), icon: submenuIcon(for: "submenuApps"), iconColor: .purple, enabled: appState.showApps)
         case "commonDirs":
             guard hasEnabledCommonDirs else { return nil }
             return .submenu(id: "commonDirs", name: submenuName(for: "commonDirs"), icon: submenuIcon(for: "commonDirs"), iconColor: .green, enabled: appState.showCommonDirs)
@@ -300,11 +302,29 @@ struct ActionSettingsTabView: View {
                 actionIconView(icon: action.icon, size: 18)
                 Text(LocalizedStringKey(action.name))
             case .submenu(_, let name, let icon, let iconColor, _):
-                Image(systemName: icon)
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .frame(width: 18, height: 18)
-                    .foregroundStyle(iconColor)
+                // 子菜单图标可以是 SF Symbol，也可以是自定义图片路径（SubmenuEditSheet
+                // 允许选图）。原来这里一律按 systemName 显示，选过自定义图片的子菜单
+                // 在设置列表里就是一个空白图标 —— Finder 里其实是正常的。
+                if icon.contains("/") {
+                    if let image = NSImage(contentsOfFile: icon) {
+                        Image(nsImage: image)
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .frame(width: 18, height: 18)
+                    } else {
+                        Image(systemName: "folder")
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .frame(width: 18, height: 18)
+                            .foregroundStyle(iconColor)
+                    }
+                } else {
+                    Image(systemName: icon)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: 18, height: 18)
+                        .foregroundStyle(iconColor)
+                }
                 Text(name)
             }
 
@@ -330,6 +350,8 @@ struct ActionSettingsTabView: View {
                             appState.showNewFiles = newVal
                         case "commonDirs":
                             appState.showCommonDirs = newVal
+                        case "submenuApps":
+                            appState.showApps = newVal
                         default:
                             break
                         }

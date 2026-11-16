@@ -36,6 +36,7 @@ struct IClickApp: App {
         SettingsWindow(appState: appState, onAppear: {})
             .defaultAppStorage(UserDefaults.group)
             .environmentObject(updateManager)
+            .commands { SettingsCommands() }
 
         // showMenuBarExtra 为 true 时显示菜单条
         MenuBarExtra(
@@ -43,6 +44,25 @@ struct IClickApp: App {
         ) {
             MenuBarView()
         }.defaultAppStorage(UserDefaults.group)
+    }
+}
+
+/// 只为了给 `AppDelegate` 一个「按 id 打开设置窗口」的入口。
+///
+/// SwiftUI 的 `Window` 场景不向 AppKit 暴露 `openWindow(id:)`；`showSettingsWindow:`
+/// 选择器只对 `Settings` 场景有效。`Commands` 里的按钮能拿到 `@Environment(\.openWindow)`，
+/// 并且会在主菜单里生成一条带 Cmd+, 的菜单项 —— `AppDelegate` 在启动/重开时
+/// 触发这条菜单项即可（见 `openSettingsWindowFromMenu()`）。
+struct SettingsCommands: Commands {
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some Commands {
+        CommandGroup(replacing: .appSettings) {
+            Button("Settings…") {
+                openWindow(id: Constants.settingsWindowID)
+            }
+            .keyboardShortcut(",", modifiers: .command)
+        }
     }
 }
 
@@ -82,6 +102,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// NSUserNotification / NSUserNotificationCenter 自 macOS 11 起废弃，在新系统上投递已不可靠，
     /// 统一改走 UserNotifications。标题与正文字面量沿用旧实现，用户看到的内容不变。
     func deliverNotification(title: String, informativeText: String) {
+        Self.postUserNotification(title: title, informativeText: informativeText)
+    }
+
+    /// 不依赖实例状态的版本，供 NSWorkspace 之类的后台回调直接调用
+    /// （那些回调不在主线程，也不该为了发一条通知去捕获 @MainActor 的 self）。
+    nonisolated static func postUserNotification(title: String, informativeText: String) {
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = informativeText
@@ -91,7 +117,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             content: content,
             trigger: nil
         )
-        // 回调在任意队列，不捕获 self（AppDelegate 是 @MainActor），避免并发隔离问题
         UNUserNotificationCenter.current().add(request) { error in
             if let error {
                 Logger(subsystem: subsystem, category: "AppDelegate")
@@ -130,6 +155,35 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // 首次启动时引导用户启用扩展
         checkAndGuideExtension()
 
+        // 诊断：登录项状态与当前 bundle 路径。
+        let currentBundlePath = Bundle.main.bundleURL.path
+        logger.info("登录项: enabled=\(LaunchAtLogin.isEnabled), bundle=\(currentBundlePath)")
+
+        // 登录项按「注册时的 bundle 路径」保存。应用从 DerivedData 挪到 /Applications
+        // （或反过来）后，系统仍报告「已启用」，但登录时拉起的是旧路径。旧副本会写同一份
+        // SharedSettings.plist，让扩展菜单和主应用内存对不上——表现为「菜单里有、点了没反应」。
+        // 这里把登录项重新注册到当前 bundle；哨兵保证只修一次。
+        //
+        // 只在 /Applications 的副本上做：从 Xcode/DerivedData 直接跑的开发副本绝不能
+        // 把开机启动项指到构建目录 —— 那正是这次故障的来源。
+        let isInstalledCopy = currentBundlePath.hasPrefix("/Applications/")
+        if isInstalledCopy,
+           LaunchAtLogin.isEnabled,
+           SharedSettings.string(forKey: "loginItemBundlePath") != currentBundlePath {
+            LaunchAtLogin.isEnabled = false
+            LaunchAtLogin.isEnabled = true
+            if LaunchAtLogin.isEnabled {
+                SharedSettings.set(currentBundlePath, forKey: "loginItemBundlePath")
+                logger.info("登录项已重新注册到当前 bundle")
+            } else {
+                logger.warning("登录项重新注册失败，登录时将不会自动启动")
+                deliverNotification(
+                    title: "登录项设置失败",
+                    informativeText: "IClick 无法更新开机启动项。请打开设置，把「登录时启动」关掉再重新打开。"
+                )
+            }
+        }
+
         messager.on(name: Key.messageFromFinder) { payload in
             self.logger.info("recive mess from finder by app \(payload.description)")
             switch payload.action {
@@ -151,9 +205,87 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         sendObserveDirMessage()
-        
+
+        // 用户自己启动（Finder 双击 / 启动台 / open）时把设置窗口打开。
+        //
+        // 设置窗口是 `.defaultLaunchBehavior(.suppressed)` —— 那是为了让扩展的
+        // 冷启动不要弹窗。但 suppressed 同时也会让「双击应用」什么都不发生，
+        // 而菜单栏图标和程序坞图标都可以被用户关掉；两者叠加就再也没有入口了
+        // （实测 `open /Applications/Iclick.app` 后窗口数为 0）。
+        //
+        // 扩展拉起时带 --launched-by-extension，登录项拉起时识别 wasLaunchedAtLogin，
+        // 这两种情况保持不弹窗。异步一拍是为了等 SwiftUI 把主菜单建出来。
+        if !Self.launchedByExtension && !LaunchAtLogin.wasLaunchedAtLogin {
+            DispatchQueue.main.async { [weak self] in
+                self?.openSettingsWindowFromMenu()
+            }
+        }
     }
-    
+
+    /// 扩展拉起主应用时传的启动参数（见 FinderSyncExt.launchHostApp）。
+    static let launchedByExtension = CommandLine.arguments.contains("--launched-by-extension")
+
+    /// 双击已在运行的 Iclick.app、或点程序坞图标时，系统会调用这里。
+    /// 应用被扩展冷启动过（窗口是 suppressed 的）也一样要能打开设置窗口。
+    ///
+    /// 不按 hasVisibleWindows 提前返回：窗口存在但被最小化 / 在别的桌面时，
+    /// flag 仍可能是 true，用户看到的就是「双击了没反应」。openWindow(id:)
+    /// 对已存在的窗口是幂等的，统一走一遍再把它抬到前面。
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        openSettingsWindowFromMenu()
+        NSApp.activate(ignoringOtherApps: true)
+        return true
+    }
+
+    /// SwiftUI 的 Window 场景没有 AppKit 侧的公开打开接口（`showSettingsWindow:`
+    /// 只对 `Settings` 场景有效）。主菜单里那条带 Cmd+, 的「设置」项背后就是
+    /// `openWindow(id:)`（见 SettingsCommands），直接触发它的 action。
+    ///
+    /// Commands 菜单项是 SwiftUI 在启动过程中装进主菜单的，冷启动/重开有可能
+    /// 赶在它前面；找不到时重试几次，避免「双击了但没反应」。
+    private func openSettingsWindowFromMenu(attempt: Int = 0) {
+        if let item = Self.findSettingsMenuItem(in: NSApp.mainMenu),
+           let action = item.action {
+            NSApp.sendAction(action, to: item.target, from: item)
+            bringSettingsWindowFront()
+            return
+        }
+
+        guard attempt < 10 else {
+            logger.warning("找不到设置菜单项，无法打开设置窗口")
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            self?.openSettingsWindowFromMenu(attempt: attempt + 1)
+        }
+    }
+
+    /// 窗口已存在但被最小化、或压在别的窗口后面时，openWindow 不一定把它抬起来。
+    private func bringSettingsWindowFront() {
+        DispatchQueue.main.async {
+            if let window = NSApp.windows.first(where: {
+                $0.identifier?.rawValue == Constants.settingsWindowID
+            }) {
+                window.makeKeyAndOrderFront(nil)
+            }
+            NSApp.activate(ignoringOtherApps: true)
+        }
+    }
+
+    private static func findSettingsMenuItem(in menu: NSMenu?) -> NSMenuItem? {
+        guard let menu else { return nil }
+        for item in menu.items {
+            // 按快捷键而不是标题找：标题会随系统语言变化，Cmd+, 是固定的。
+            if item.keyEquivalent == ",", item.keyEquivalentModifierMask.contains(.command) {
+                return item
+            }
+            if let submenu = item.submenu, let found = findSettingsMenuItem(in: submenu) {
+                return found
+            }
+        }
+        return nil
+    }
+
     func openCommonDirs(target: [String]) {
         for dirPath in target {
             let path = dirPath.removingPercentEncoding ?? dirPath
@@ -806,6 +938,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         logger.info("createFile called with rid: \(rid), target: \(target)")
         guard let rcitem = appState.getFileType(rid: rid), let dirPath = target.first else {
             logger.warning("createFile: file type not found \(rid)")
+            // 配置里没有这个文件类型（旧菜单快照 / 用户刚重置过），别让点击静默消失
+            deliverNotification(
+                title: "创建文件失败",
+                informativeText: "找不到要创建的文件类型。请打开 IClick 设置确认「新建文件」列表。"
+            )
             return
         }
         let decodedDir = dirPath.removingPercentEncoding ?? dirPath
@@ -820,7 +957,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             dirURL = dirURL.deletingLastPathComponent()
         }
 
-        _ = doCreateFile(in: dirURL, rcitem: rcitem, ext: rcitem.ext)
+        if !doCreateFile(in: dirURL, rcitem: rcitem, ext: rcitem.ext) {
+            // 只读目录、没有写权限、模板文件丢失都会走到这里。原来返回值被丢弃，
+            // 界面上完全没有反馈。
+            deliverNotification(
+                title: "创建文件失败",
+                informativeText: "无法在「\(dirURL.lastPathComponent)」中创建 \(rcitem.defaultName)\(rcitem.ext)。"
+            )
+        }
     }
 
     /// 在指定目录中创建文件
@@ -872,8 +1016,25 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - 打开应用
 
     func openApp(rid: String, target: [String]) {
-        guard let rcitem = appState.getAppItem(rid: rid) else {
+        var rcitem = appState.getAppItem(rid: rid)
+        if rcitem == nil {
+            // 菜单是扩展按「推送快照」建的，主应用内存里的列表可能已经过期：
+            // 同一个 bundle 的另一个副本（旧构建、登录项拉起的旧版）改写了
+            // SharedSettings.plist，但本进程只在启动时读过一次。现象就是
+            // 「右键菜单里有这个 App，点了没反应」。
+            // 从磁盘重读一次再匹配，不要求用户重启应用。
+            logger.info("openApp: 内存中没有 rid，从磁盘重读配置后重试")
+            appState.refresh()
+            rcitem = appState.getAppItem(rid: rid)
+        }
+        guard let rcitem else {
             logger.warning("openApp: app not found \(rid)")
+            // 重读磁盘后仍然找不到：说明配置里已经没有这个 App（被删掉，或菜单是
+            // 很久以前的旧快照）。只写日志用户只会看到「点了没反应」，给一条通知。
+            deliverNotification(
+                title: "打开失败",
+                informativeText: "找不到要打开的应用。请打开 IClick 设置，确认「常用 App」里这一项仍然存在。"
+            )
             return
         }
 
@@ -900,6 +1061,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NSWorkspace.shared.openApplication(at: appURL, configuration: config) { runningApp, error in
             if let error = error {
                 log.error("启动应用失败: \(appName), \(error.localizedDescription)")
+                // 应用被移动/删除、或签名损坏时会走到这里。原来只有日志，
+                // 用户看到的是「点了没反应」。
+                Self.postUserNotification(
+                    title: "打开失败",
+                    informativeText: "无法启动「\(appName)」：\(error.localizedDescription)"
+                )
                 return
             }
             log.info("应用已启动: \(runningApp?.localizedName ?? appName)")
@@ -987,12 +1154,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         logger.info("applicationWillTerminate")
     }
 
-    /// 检查扩展是否已启用（使用 FIFinderSyncController 和 pluginkit 双重验证）
-    private var isExtensionEnabled: Bool {
-        // 主检测：FIFinderSyncController 系统 API
-        if FIFinderSyncController.isExtensionEnabled { return true }
-
-        // 辅助检测：通过 pluginkit 查询扩展状态（先按协议，再按 bundle ID）
+    /// 通过 pluginkit 查询扩展状态（FIFinderSyncController 报 false 时的辅助检测）。
+    ///
+    /// 放在 `nonisolated static` 里是为了能挪到后台队列执行：`Process.waitUntilExit()`
+    /// 没有超时，pluginkit 一旦卡住就会把主线程（连同启动路径）一起钉住。
+    nonisolated private static func pluginkitReportsExtensionEnabled() -> Bool {
         let extBundleID = "cn.anwen.IClick.FinderSyncExt"
 
         let task = Process()
@@ -1010,19 +1176,30 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         } catch {
             // 归档打包后，沙盒/Hardened Runtime 会限制 Process 执行系统工具
             // Process 执行失败 ≠ 扩展未启用，应乐观假设已启用以避免误报
-            logger.warning("pluginkit 执行失败(沙盒限制): \(error.localizedDescription)，跳过检测")
+            Logger(subsystem: subsystem, category: "AppDelegate")
+                .warning("pluginkit 执行失败(沙盒限制): \(error.localizedDescription)，跳过检测")
             return true
         }
     }
 
-    /// 每次启动时检查扩展是否已启用，未启用则提醒一次
+    /// 每次启动时检查扩展是否已启用，未启用则提醒一次。
+    ///
+    /// 不要在主线程上同步跑 pluginkit：这条路径紧挨着「打开设置窗口」，
+    /// 一旦 pluginkit 卡住，用户看到的就是双击应用没反应。
     private func checkAndGuideExtension() {
-        // 已启用则跳过
-        guard !isExtensionEnabled else { return }
+        // 登录项启动 / 扩展拉起时不要弹模态框：前者会把用户登录后的第一屏拦住，
+        // 后者根本不可能发生在扩展未启用的情况下。
+        guard !Self.launchedByExtension, !LaunchAtLogin.wasLaunchedAtLogin else { return }
+        // 主检测：FIFinderSyncController 是本地状态查询，很快
+        guard !FIFinderSyncController.isExtensionEnabled else { return }
 
-        // 延迟弹窗，等应用完全启动
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            self.showExtensionGuide()
+        Task.detached(priority: .utility) { [weak self] in
+            let enabled = Self.pluginkitReportsExtensionEnabled()
+            guard !enabled else { return }
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            await MainActor.run {
+                self?.showExtensionGuide()
+            }
         }
     }
 

@@ -46,6 +46,28 @@ public class Utils {
         return limitedComponents.joined(separator: "/")
     }
 
+    /// 以无 Dock 图标（.accessory）身份运行时，NSOpenPanel.runModal() 可能不会
+    /// 顶到前面：面板躲在别的窗口后面，用户看到的是「点了按钮没反应」，而且模态
+    /// 循环已经占住了应用。这里临时切到 .regular 并激活，关闭后恢复原来的策略。
+    /// （CommonDirsSettingTabView 里原本就是这段逻辑，另外几个面板漏了。）
+    @MainActor
+    static func runOpenPanel(_ configure: (NSOpenPanel) -> Void) -> URL? {
+        let oldPolicy = NSApp.activationPolicy()
+        if oldPolicy != .regular {
+            NSApp.setActivationPolicy(.regular)
+        }
+        NSApp.activate(ignoringOtherApps: true)
+
+        let panel = NSOpenPanel()
+        configure(panel)
+        let response = panel.runModal()
+
+        if oldPolicy != .regular {
+            NSApp.setActivationPolicy(oldPolicy)
+        }
+        return response == .OK ? panel.url : nil
+    }
+
     /// 自定义图标的存放目录。
     ///
     /// 必须落在 **App Group 容器**里。FinderSync 扩展是沙盒进程，读不到
@@ -56,39 +78,70 @@ public class Utils {
     ///
     /// `containerURL(forSecurityApplicationGroupIdentifier:)` 在这里不能用：主应用**没有**
     /// 沙盒，也就没有该 entitlement，这个 API 会返回 nil，所以直接拼标准路径。
-    static var customIconsDir: URL {
-        let groupDir = FileManager.default.homeDirectoryForCurrentUser
+    ///
+    /// 返回 nil = 群组容器不可用。此时**不能**退到 Application Support：
+    /// 扩展读不到那里，结果就是设置里图标正常、Finder 里静默变回系统图标，
+    /// 而且这个坏路径已经被写进配置。宁可让调用方保持原图标，也不制造静默故障。
+    static var customIconsDir: URL? {
+        let fm = FileManager.default
+        let groupDir = fm.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Group Containers")
             .appendingPathComponent(Constants.suitName)
-        if FileManager.default.fileExists(atPath: groupDir.path) {
-            return groupDir.appendingPathComponent("CustomIcons")
+        if !fm.fileExists(atPath: groupDir.path) {
+            do {
+                try fm.createDirectory(at: groupDir, withIntermediateDirectories: true)
+            } catch {
+                logger.error("App Group 容器不可用，无法保存自定义图标: \(error.localizedDescription)")
+                return nil
+            }
         }
-        // 容器不存在（异常情况）时退回原位置：至少不比改动前更差
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        return appSupport.appendingPathComponent("CustomIcons")
+        return groupDir.appendingPathComponent("CustomIcons")
     }
 
     /// 从 NSOpenPanel 选择图片并复制到自定义图标目录，返回目标路径
     @MainActor
     @discardableResult
     static func pickAndCopyIcon() -> String? {
-        let panel = NSOpenPanel()
-        panel.title = "选择图标"
-        panel.allowedContentTypes = [.image]
-        panel.allowsMultipleSelection = false
-        panel.canChooseDirectories = false
-        guard panel.runModal() == .OK, let url = panel.url else { return nil }
+        guard let picked = runOpenPanel({ panel in
+            panel.title = "选择图标"
+            panel.allowedContentTypes = [.image]
+            panel.allowsMultipleSelection = false
+            panel.canChooseDirectories = false
+        }) else { return nil }
+        let url = picked
 
-        let iconsDir = customIconsDir
-        let dest = iconsDir.appendingPathComponent(url.lastPathComponent)
+        guard let iconsDir = customIconsDir else { return nil }
+        let fm = FileManager.default
+        let desired = iconsDir.appendingPathComponent(url.lastPathComponent)
+
         do {
-            try FileManager.default.createDirectory(at: iconsDir, withIntermediateDirectories: true)
-            // 同名文件先删再复制。删失败要当成错误抛出来 —— 忽略它的话后面 copy 必然
-            // 报 "file exists"，两条 try? 叠在一起就看不出到底哪步坏了。
-            if FileManager.default.fileExists(atPath: dest.path) {
-                try FileManager.default.removeItem(at: dest)
+            try fm.createDirectory(at: iconsDir, withIntermediateDirectories: true)
+
+            // 同名文件不能无条件覆盖：另一个 App / 子菜单可能正引用着这个路径，
+            // 用户给 B 选了同名的 icon.png，A 的图标会跟着变。
+            // 内容相同就复用原路径；内容不同则换一个唯一的文件名。
+            var dest = desired
+            if fm.fileExists(atPath: desired.path) {
+                // 只有两边都成功读出来且逐字节相同时才复用；任一边读取失败都不能
+                // 当成「相同」（nil == nil 会错误地返回一个可能不可用的旧路径）。
+                if let old = try? Data(contentsOf: desired),
+                   let new = try? Data(contentsOf: url),
+                   old == new {
+                    return desired.path
+                }
+                let base = url.deletingPathExtension().lastPathComponent
+                let ext = url.pathExtension
+                var n = 1
+                repeat {
+                    let name = ext.isEmpty ? "\(base)-\(n)" : "\(base)-\(n).\(ext)"
+                    dest = iconsDir.appendingPathComponent(name)
+                    n += 1
+                    if n > 1000 { throw CocoaError(.fileWriteFileExists) }
+                } while fm.fileExists(atPath: dest.path)
             }
-            try FileManager.default.copyItem(at: url, to: dest)
+
+            try fm.copyItem(at: url, to: dest)
+            return dest.path
         } catch {
             // 失败必须返回 nil，不能返回 dest.path。返回路径会让设置里记下一个并不存在
             // 的文件（三个调用点都是 `if let`，nil 会保持原图标不动），
@@ -97,6 +150,5 @@ public class Utils {
             logger.error("复制自定义图标失败: \(url.path) -> \(error.localizedDescription)")
             return nil
         }
-        return dest.path
     }
 }

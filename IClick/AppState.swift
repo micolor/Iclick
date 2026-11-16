@@ -23,13 +23,45 @@ class AppState: ObservableObject {
     @Published var cdirs: [CommonDir] = []
     @Published var inExt: Bool
 
+    /// 本次 `load()` 解码失败的配置键。`save()` 必须跳过这些键，否则会把内存里
+    /// 的默认值（常见是空数组）写回磁盘，把用户只是「暂时读不出来」的数据永久抹掉。
+    /// 重新 load 成功后会自动移出。
+    private var failedKeys: Set<String> = []
+
+    // 注意：这些是计算属性，不是 @Published。写入之后必须手动发 objectWillChange，
+    // 否则设置界面里的 Toggle 读到的还是本次视图更新时捕获的旧值，开关会「回弹」——
+    // plist 和 Finder 菜单其实已经变了，界面却显示没变。
     var showCommonDirs: Bool {
         get { SharedSettings.bool(forKey: "showCommonDirs") }
-        set { SharedSettings.set(newValue, forKey: "showCommonDirs"); SharedSettings.synchronize(); notifyConfigChanged() }
+        set {
+            SharedSettings.set(newValue, forKey: "showCommonDirs")
+            SharedSettings.synchronize()
+            objectWillChange.send()
+            notifyConfigChanged()
+        }
     }
     var showNewFiles: Bool {
         get { SharedSettings.bool(forKey: "showNewFiles") }
-        set { SharedSettings.set(newValue, forKey: "showNewFiles"); SharedSettings.synchronize(); notifyConfigChanged() }
+        set {
+            SharedSettings.set(newValue, forKey: "showNewFiles")
+            SharedSettings.synchronize()
+            objectWillChange.send()
+            notifyConfigChanged()
+        }
+    }
+    /// 「常用 App」子菜单的显示开关。键不存在时默认开启（老配置里没有这个键）。
+    var showApps: Bool {
+        get {
+            SharedSettings.object(forKey: "showSubmenuApps") == nil
+                ? true
+                : SharedSettings.bool(forKey: "showSubmenuApps")
+        }
+        set {
+            SharedSettings.set(newValue, forKey: "showSubmenuApps")
+            SharedSettings.synchronize()
+            objectWillChange.send()
+            notifyConfigChanged()
+        }
     }
     /// 初始化默认值
     private func initDefaults() {
@@ -288,16 +320,23 @@ class AppState: ObservableObject {
     @MainActor
     private func save() throws {
         let encoder = PropertyListEncoder()
-        let appItemsData = try encoder.encode(apps)
-        let actionItemsData = try encoder.encode(actions)
-        let filetypeItemsData = try encoder.encode(newFiles)
-        let permDirsData = try encoder.encode(dirs)
-        let commonDirsData = try encoder.encode(cdirs)
-        SharedSettings.set(appItemsData, forKey: Key.apps)
-        SharedSettings.set(actionItemsData, forKey: Key.actions)
-        SharedSettings.set(filetypeItemsData, forKey: Key.fileTypes)
-        SharedSettings.set(permDirsData, forKey: Key.permDirs)
-        SharedSettings.set(commonDirsData, forKey: Key.commonDirs)
+        // 解码失败过的段一律不写：内存里是默认值，写回去等于覆盖磁盘数据。
+        // 这是「用户随后任意点一下设置」就永久丢数据的最后一层保护。
+        if !failedKeys.contains(Key.apps) {
+            SharedSettings.set(try encoder.encode(apps), forKey: Key.apps)
+        }
+        if !failedKeys.contains(Key.actions) {
+            SharedSettings.set(try encoder.encode(actions), forKey: Key.actions)
+        }
+        if !failedKeys.contains(Key.fileTypes) {
+            SharedSettings.set(try encoder.encode(newFiles), forKey: Key.fileTypes)
+        }
+        if !failedKeys.contains(Key.permDirs) {
+            SharedSettings.set(try encoder.encode(dirs), forKey: Key.permDirs)
+        }
+        if !failedKeys.contains(Key.commonDirs) {
+            SharedSettings.set(try encoder.encode(cdirs), forKey: Key.commonDirs)
+        }
         // 立即同步到磁盘，确保扩展进程能立即读取
         SharedSettings.synchronize()
         // 仅主应用发送通知，扩展自身不需要通知自己
@@ -308,6 +347,10 @@ class AppState: ObservableObject {
 
     @MainActor
     func savePermissiveDir() throws {
+        guard !failedKeys.contains(Key.permDirs) else {
+            logger.warning("permDirs 解码失败过，跳过保存以免覆盖磁盘上的原始数据")
+            return
+        }
         let encoder = PropertyListEncoder()
         let permDirsData = try encoder.encode(dirs)
         SharedSettings.set(permDirsData, forKey: Key.permDirs)
@@ -320,6 +363,10 @@ class AppState: ObservableObject {
     //  保存常用路径
     @MainActor
     func saveCommonDir() throws {
+        guard !failedKeys.contains(Key.commonDirs) else {
+            logger.warning("commonDirs 解码失败过，跳过保存以免覆盖磁盘上的原始数据")
+            return
+        }
         let encoder = PropertyListEncoder()
         let commonDirsData = try encoder.encode(cdirs)
         SharedSettings.set(commonDirsData, forKey: Key.commonDirs)
@@ -386,6 +433,8 @@ class AppState: ObservableObject {
         // 有任意一段解码失败就置位：本次加载不做「首次落盘」，
         // 避免用内存里的默认值覆盖磁盘上可能只是暂时读不出来的用户数据
         var skipInitialSave = false
+        // 记录失败段：save() 会跳过这些键，直到下一次成功 load。
+        failedKeys.removeAll()
 
         // 注意：下面每一段都用 try? 单独解码。
         // 之前是整函数 throws，任意一段解码失败都会中断后面的加载，
@@ -394,19 +443,23 @@ class AppState: ObservableObject {
             if let permDirsData = SharedSettings.data(forKey: Key.permDirs) {
                 if let decoded = try? decoder.decode([PermissiveDir].self, from: permDirsData) {
                     dirs = decoded
+                    failedKeys.remove(Key.permDirs)
                     logger.info("load permDir success")
                 } else {
                     logger.error("permDirs 解码失败，保留原值")
+                    failedKeys.insert(Key.permDirs)
                     skipInitialSave = true
                 }
             } else {
                 dirs = []
+                failedKeys.remove(Key.permDirs)
             }
         }
 
         if let commonDirsData = SharedSettings.data(forKey: Key.commonDirs) {
             if let dirs = try? decoder.decode([CommonDir].self, from: commonDirsData) {
                 cdirs = dirs
+                failedKeys.remove(Key.commonDirs)
                 logger.info("load common dirs success")
             } else {
                 // 空的「兼容旧版 OrderedSet 格式」分支已删除：OrderedSet 与 Array 的
@@ -417,10 +470,12 @@ class AppState: ObservableObject {
                 // 一旦同时满足「fileTypes 键缺失」（needsInitialSave 为真），
                 // 函数末尾的首次落盘就会把空数组写回磁盘，直接抹掉用户的常用目录。
                 logger.error("commonDirs 解码失败，保留原值且不写回")
+                failedKeys.insert(Key.commonDirs)
                 skipInitialSave = true
             }
         } else {
             cdirs = []
+            failedKeys.remove(Key.commonDirs)
         }
 
         if let actionData = SharedSettings.data(forKey: Key.actions) {
@@ -445,26 +500,32 @@ class AppState: ObservableObject {
                         }
                     }
                 }
+                failedKeys.remove(Key.actions)
                 logger.info("load actions success")
             } else {
                 logger.error("actions 解码失败，保留原值")
+                failedKeys.insert(Key.actions)
                 skipInitialSave = true
             }
         } else {
             actions = RCAction.defaultActions
+            failedKeys.remove(Key.actions)
         }
 
         var needsInitialSave = false
         if let filetypeItemData = SharedSettings.data(forKey: Key.fileTypes) {
             if let decodedFiles = try? decoder.decode([NewFile].self, from: filetypeItemData) {
                 newFiles = decodedFiles
+                failedKeys.remove(Key.fileTypes)
                 logger.info("load filetype success")
             } else {
                 logger.error("fileTypes 解码失败，保留原值")
+                failedKeys.insert(Key.fileTypes)
                 skipInitialSave = true
             }
         } else {
             newFiles = NewFile.all
+            failedKeys.remove(Key.fileTypes)
             // 首次加载：延迟到全部字段载入后再落盘。
             // 否则 save() 会把此刻尚未赋值的 apps（空数组）写回，把用户的常用 App 清空。
             needsInitialSave = !inExt
@@ -473,15 +534,18 @@ class AppState: ObservableObject {
         if let appItemData = SharedSettings.data(forKey: Key.apps) {
             if let decodedApps = try? decoder.decode([OpenWithApp].self, from: appItemData) {
                 apps = decodedApps
+                failedKeys.remove(Key.apps)
                 logger.info("load apps success, count=\(decodedApps.count)")
             } else {
                 // 关键：解码失败时不能退回默认列表并落盘，那会把用户数据直接抹掉
                 logger.error("apps 解码失败，保留原值且不写回")
+                failedKeys.insert(Key.apps)
                 skipInitialSave = true
             }
         } else {
             let fallback = OpenWithApp.defaultApps
             apps = fallback
+            failedKeys.remove(Key.apps)
             logger.info("no saved apps, using defaults: \(fallback.map { $0.name })")
         }
 

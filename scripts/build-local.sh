@@ -289,6 +289,14 @@ xattr -dr com.apple.quarantine "$INSTALL_PATH" 2>/dev/null || true
 
 # 重新注册，避免 stale 副本导致右键菜单出现两次
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+
+# 先注销 DerivedData 里旧构建的注册。同一个 bundle id 有多个副本时，
+# LaunchServices 可能把 open / 扩展拉起主应用解析到旧副本 —— 两份进程读写同一份
+# SharedSettings.plist，就会出现「扩展菜单里有、点了没反应」。
+for stale in "$HOME"/Library/Developer/Xcode/DerivedData/IClick-*/Build/Products/*/Iclick.app; do
+    [ -d "$stale" ] && "$LSREGISTER" -u "$stale" 2>/dev/null || true
+done
+
 "$LSREGISTER" -f -R -trusted "$INSTALL_PATH"
 pluginkit -a "$INSTALL_PATH/Contents/PlugIns/FinderSyncExt.appex" 2>/dev/null || true
 open "$INSTALL_PATH"
@@ -316,6 +324,10 @@ if [ "$ext_registered" = 1 ]; then
 else
     printf '  \033[1;31m!\033[0m 扩展未出现在 pluginkit 中，Finder 右键菜单可能不生效\n' >&2
 fi
+
+# 安装和重新注册期间，Finder 可能同时拉起两个扩展实例 —— 右键菜单会出现两次。
+# 全部结束掉，让 Finder 在下次右键时按需拉起唯一实例。
+pkill -f 'FinderSyncExt.appex' 2>/dev/null || true
 
 log "完成"
 ps -ax -o pid,comm | grep -i "$APP_NAME.app" | grep -v grep | sed 's/^/  /' || true

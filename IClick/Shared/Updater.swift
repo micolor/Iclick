@@ -15,8 +15,10 @@ import SwiftUI
 struct GitHubRelease: Codable, Identifiable {
     let id: Int
     let tagName: String
-    let name: String
-    let body: String
+    /// GitHub Releases API 里 name/body 都是 nullable（没写标题/更新说明时返回 null）。
+    /// 声明成非可选会让整个解码抛 valueNotFound，更新功能对该版本直接失效。
+    let name: String?
+    let body: String?
     let draft: Bool
     let prerelease: Bool
     let publishedAt: Date
@@ -215,6 +217,10 @@ class UpdateManager: ObservableObject {
     // MARK: - 下载和安装方法
 
     func downloadAndInstallUpdate() async {
+        // 按钮在视图切到「正在下载」之前可以被连点；两个 Task 会用同一个临时
+        // 文件名下载并可能并发安装。直接忽略重入。
+        guard !isDownloading else { return }
+
         guard let release = availableUpdate else {
             updateError = "没有可用的更新"
             return
@@ -246,9 +252,17 @@ class UpdateManager: ObservableObject {
             try verifyAppBundle(extracted.app)
             try await installApplication(appURL: extracted.app)
 
+            // 安装完成后清掉「有可用更新」状态：否则用户选「稍后重启」后，
+            // 弹窗会退回到「发现新版本」，还能重复下载安装。
+            availableUpdate = nil
+            showUpdateSheet = false
             showInstallationCompleteAlert()
         } catch {
             updateError = "安装失败: \(error.localizedDescription)"
+            // UpdaterView 原来先判断 availableUpdate 再看 updateError；失败时
+            // availableUpdate 还在，错误信息永远显示不出来。除了调整判断顺序，
+            // 这里也清掉它，避免状态自相矛盾。
+            availableUpdate = nil
         }
 
         // 失败路径之前不清理，临时目录里会一直堆积几十 MB 的下载包和解压结果
@@ -389,36 +403,42 @@ class UpdateManager: ObservableObject {
         let extractionDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("app_extraction-\(UUID().uuidString)")
 
-        try FileManager.default.createDirectory(at: extractionDir, withIntermediateDirectories: true)
+        do {
+            try FileManager.default.createDirectory(at: extractionDir, withIntermediateDirectories: true)
 
-        // unzip 是同步阻塞调用，放到主线程之外执行，否则安装期间整个界面卡住
-        try await Task.detached(priority: .userInitiated) {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
-            process.arguments = ["-o", zipURL.path, "-d", extractionDir.path]
+            // unzip 是同步阻塞调用，放到主线程之外执行，否则安装期间整个界面卡住
+            try await Task.detached(priority: .userInitiated) {
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
+                process.arguments = ["-o", zipURL.path, "-d", extractionDir.path]
 
-            let errorPipe = Pipe()
-            process.standardOutput = Pipe()
-            process.standardError = errorPipe
+                let errorPipe = Pipe()
+                process.standardOutput = Pipe()
+                process.standardError = errorPipe
 
-            try process.run()
-            process.waitUntilExit()
+                try process.run()
+                process.waitUntilExit()
 
-            guard process.terminationStatus == 0 else {
-                let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-                let errorString = String(data: errorData, encoding: .utf8) ?? "未知错误"
-                throw InstallationError.zipExtractionFailed("解压失败: \(errorString)")
+                guard process.terminationStatus == 0 else {
+                    let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+                    let errorString = String(data: errorData, encoding: .utf8) ?? "未知错误"
+                    throw InstallationError.zipExtractionFailed("解压失败: \(errorString)")
+                }
+            }.value
+
+            let fileManager = FileManager.default
+            let contents = try fileManager.contentsOfDirectory(at: extractionDir, includingPropertiesForKeys: nil)
+
+            guard let appURL = contents.first(where: { $0.pathExtension == "app" }) else {
+                throw InstallationError.noAppFound("在ZIP文件中未找到.app应用程序")
             }
-        }.value
 
-        let fileManager = FileManager.default
-        let contents = try fileManager.contentsOfDirectory(at: extractionDir, includingPropertiesForKeys: nil)
-
-        guard let appURL = contents.first(where: { $0.pathExtension == "app" }) else {
-            throw InstallationError.noAppFound("在ZIP文件中未找到.app应用程序")
+            return (appURL, extractionDir)
+        } catch {
+            // 失败时调用方拿不到 root 路径，无法清理；在这里删掉残留的解压目录。
+            try? FileManager.default.removeItem(at: extractionDir)
+            throw error
         }
-
-        return (appURL, extractionDir)
     }
 
     // MARK: - 请求文件夹权限
@@ -432,7 +452,19 @@ class UpdateManager: ObservableObject {
         openPanel.allowsMultipleSelection = false
         openPanel.directoryURL = FileManager.default.urls(for: .applicationDirectory, in: .localDomainMask).first
 
+        // 与设置里的 NSOpenPanel 同理：accessory 应用的面板可能藏在其他窗口后面，
+        // 用户只会看到更新卡住。请求权限前临时切到 regular 并激活。
+        let oldPolicy = NSApp.activationPolicy()
+        if oldPolicy != .regular {
+            NSApp.setActivationPolicy(.regular)
+        }
+        NSApp.activate(ignoringOtherApps: true)
+
         let response = await openPanel.begin()
+
+        if oldPolicy != .regular {
+            NSApp.setActivationPolicy(oldPolicy)
+        }
 
         guard response == .OK, let selectedURL = openPanel.url else {
             throw InstallationError.permissionDenied("用户取消了授权。")
