@@ -15,5 +15,10 @@
 	<array>
 		<string>group.33WRMMC62L.cn.anwen.IClick</string>
 	</array>
+	<!-- 扩展 → 主应用的动作通道是 App Group 容器里的 Unix domain socket。
+	     App Sandbox 把 socket 连接归到 network-outbound，没有这条时
+	     connect() 会被沙盒拒绝（表现为 IPC 一直失败、右键点击没反应）。 -->
+	<key>com.apple.security.network.client</key>
+	<true/>
 </dict>
 </plist>

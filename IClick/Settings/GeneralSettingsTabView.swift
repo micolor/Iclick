@@ -20,40 +20,57 @@ struct GeneralSettingsTabView: View {
     /// 之前这里用 @AppStorage 写 UserDefaults.standard，而 AppDelegate 读的是 plist，
     /// 两者不通 → 开关状态在下次启动时丢失。
     @State private var showInDock = SharedSettings.bool(forKey: Key.showInDock)
+    /// FDA 只在进入设置页 / 从系统设置切回来时探测，不在渲染期间反复读受保护文件。
+    @State private var fullDiskAccessStatus: Constants.FullDiskAccessStatus = Constants.fullDiskAccessStatus
 
     @EnvironmentObject var appState: AppState
 
     var body: some View {
         Form {
-            // Extension
+            // 两项都由 macOS 管理，但机制完全不同：
+            // 扩展启用决定「有没有菜单」，FDA 只决定「受保护路径里的动作能不能成功」。
+            // 用整行可点击 + 右端状态/箭头，避免每行再放一个蓝色按钮造成视觉噪声。
             Section {
-                HStack {
-                    Text("启用扩展")
-                    Spacer()
-                    Button("打开系统设置") {
-                        FinderSync.FIFinderSyncController.showExtensionManagementInterface()
-                    }
+                permissionRow(
+                    icon: "puzzlepiece.extension",
+                    title: "Finder 扩展",
+                    requirement: "必需",
+                    description: "启用后 Finder 右键菜单里才会出现 IClick",
+                    statusText: extensionEnabled ? "已启用" : "未启用",
+                    statusColor: extensionEnabled ? .green : .orange
+                ) {
+                    FinderSync.FIFinderSyncController.showExtensionManagementInterface()
                 }
-                HStack {
-                    Image(systemName: extensionEnabled ? "checkmark.circle.fill" : "circle.dashed")
-                        .foregroundStyle(extensionEnabled ? .green : .secondary)
-                    Text(extensionEnabled ? "扩展已启用" : "扩展未启用")
-                        .foregroundStyle(.secondary)
-                }
-            }
 
-            // Full Disk Access：右键菜单要在所有目录生效，必须授权
-            Section {
-                HStack {
-                    Text("右键菜单在所有目录生效")
-                    Spacer()
-                    Button("授权完全磁盘访问") {
-                        openFullDiskAccessSettings()
-                    }
+                permissionRow(
+                    icon: "lock.shield",
+                    title: "完全磁盘访问",
+                    requirement: "可选",
+                    description: "仅在资源库、其他用户目录、外接磁盘等受保护位置操作文件时需要；授权后请重启 IClick",
+                    statusText: fullDiskAccessStatus.title,
+                    statusColor: fullDiskAccessStatus.tint
+                ) {
+                    openFullDiskAccessSettings()
                 }
-                Text("FinderSync 扩展受沙盒限制，未授权前只能在已授权目录显示菜单。授权后可在任意目录使用。")
+            } header: {
+                HStack {
+                    Text("权限与状态")
+                    Spacer()
+                    Button {
+                        refreshPermissionStatus()
+                    } label: {
+                        Label("重新检测", systemImage: "arrow.clockwise")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("重新检测 Finder 扩展与完全磁盘访问状态")
+                }
+            } footer: {
+                Text("两项都由 macOS 管理，IClick 只能打开对应设置，无法代替你开启；从系统设置返回后会自动重新检测。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             // Launch & Appearance
@@ -81,18 +98,100 @@ struct GeneralSettingsTabView: View {
         // didBecomeActive —— onForeground 已经覆盖了。原来那个 5 秒常驻定时器
         // 只是重复同一件事，窗口开着时每分钟白醒 12 次，去掉。
         .onForeground {
-            updateEnableState()
+            // 用户可能刚从扩展管理面板或完全磁盘访问面板切回来。
+            // 注意：TCC 对进程有缓存，刚授权时这里可能仍是「未授权」，
+            // 需要退出并重开 IClick 才作数 —— 文案里已说明。
+            refreshPermissionStatus()
         }
+    }
+
+    /// 整行可点击的权限行：左端图标 + 标题/说明，右端状态点和进入系统设置的箭头。
+    /// 状态点使用固定 6pt 圆点，和文字基线对齐；两行的状态文字右对齐，避免按钮宽度不同造成错位。
+    private func permissionRow(
+        icon: String,
+        title: String,
+        requirement: String,
+        description: String,
+        statusText: String,
+        statusColor: Color,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: icon)
+                    .font(.system(size: 15))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 20)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 6) {
+                        Text(title)
+                        Text(requirement)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Text(description)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Spacer(minLength: 12)
+
+                HStack(spacing: 5) {
+                    Circle()
+                        .fill(statusColor)
+                        .frame(width: 6, height: 6)
+                    Text(statusText)
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.top, 1)
+
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+                    .padding(.top, 2)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     func updateEnableState() {
         extensionEnabled = FIFinderSyncController.isExtensionEnabled
     }
 
+    func refreshPermissionStatus() {
+        updateEnableState()
+        fullDiskAccessStatus = Constants.fullDiskAccessStatus
+    }
+
     /// 打开系统设置的「完全磁盘访问」面板
     func openFullDiskAccessSettings() {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles") {
             NSWorkspace.shared.open(url)
+        }
+    }
+}
+
+private extension Constants.FullDiskAccessStatus {
+    var title: String {
+        switch self {
+        case .granted: "已授权"
+        case .denied: "未授权"
+        case .unknown: "无法判断"
+        }
+    }
+
+    var tint: Color {
+        switch self {
+        case .granted: .green
+        // FDA 是可选项：未授权用中性的灰点，不用橙色告警，
+        // 否则会和「扩展未启用」这种真正影响主功能的状态混在一起。
+        case .denied: .secondary
+        case .unknown: .secondary
         }
     }
 }

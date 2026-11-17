@@ -52,9 +52,9 @@ class AppState: ObservableObject {
     /// 「常用 App」子菜单的显示开关。键不存在时默认开启（老配置里没有这个键）。
     var showApps: Bool {
         get {
-            SharedSettings.object(forKey: "showSubmenuApps") == nil
-                ? true
-                : SharedSettings.bool(forKey: "showSubmenuApps")
+            // 只读一次：原来的三元表达式会先 object 再 bool，触发两次整份配置加载。
+            guard let value = SharedSettings.object(forKey: "showSubmenuApps") else { return true }
+            return (value as? Bool) ?? false
         }
         set {
             SharedSettings.set(newValue, forKey: "showSubmenuApps")
@@ -430,6 +430,9 @@ class AppState: ObservableObject {
     @MainActor
     private func load() {
         let decoder = PropertyListDecoder()
+        // 一次读出整份配置，避免每一段都触发一次 plist 解析。
+        // 扩展侧未收到主应用推送时，原先 5 段 = 5 次磁盘读取 + 解析。
+        let settings = SharedSettings.load()
         // 有任意一段解码失败就置位：本次加载不做「首次落盘」，
         // 避免用内存里的默认值覆盖磁盘上可能只是暂时读不出来的用户数据
         var skipInitialSave = false
@@ -440,13 +443,14 @@ class AppState: ObservableObject {
         // 之前是整函数 throws，任意一段解码失败都会中断后面的加载，
         // 留下一半新一半旧的中间状态（并且失败段保持默认值）。
         if !inExt {
-            if let permDirsData = SharedSettings.data(forKey: Key.permDirs) {
+            if let permDirsData = settings[Key.permDirs] as? Data {
                 if let decoded = try? decoder.decode([PermissiveDir].self, from: permDirsData) {
                     dirs = decoded
                     failedKeys.remove(Key.permDirs)
                     logger.info("load permDir success")
                 } else {
                     logger.error("permDirs 解码失败，保留原值")
+                    DiagnosticLog.shared.write("load permDirs failed")
                     failedKeys.insert(Key.permDirs)
                     skipInitialSave = true
                 }
@@ -456,7 +460,7 @@ class AppState: ObservableObject {
             }
         }
 
-        if let commonDirsData = SharedSettings.data(forKey: Key.commonDirs) {
+        if let commonDirsData = settings[Key.commonDirs] as? Data {
             if let dirs = try? decoder.decode([CommonDir].self, from: commonDirsData) {
                 cdirs = dirs
                 failedKeys.remove(Key.commonDirs)
@@ -470,6 +474,7 @@ class AppState: ObservableObject {
                 // 一旦同时满足「fileTypes 键缺失」（needsInitialSave 为真），
                 // 函数末尾的首次落盘就会把空数组写回磁盘，直接抹掉用户的常用目录。
                 logger.error("commonDirs 解码失败，保留原值且不写回")
+                DiagnosticLog.shared.write("load commonDirs failed")
                 failedKeys.insert(Key.commonDirs)
                 skipInitialSave = true
             }
@@ -478,7 +483,7 @@ class AppState: ObservableObject {
             failedKeys.remove(Key.commonDirs)
         }
 
-        if let actionData = SharedSettings.data(forKey: Key.actions) {
+        if let actionData = settings[Key.actions] as? Data {
             if let decodedActions = try? decoder.decode([RCAction].self, from: actionData) {
                 actions = decodedActions
                     // 过滤掉已移除的操作（如旧版的 screenshot-annotate）
@@ -504,6 +509,7 @@ class AppState: ObservableObject {
                 logger.info("load actions success")
             } else {
                 logger.error("actions 解码失败，保留原值")
+                DiagnosticLog.shared.write("load actions failed")
                 failedKeys.insert(Key.actions)
                 skipInitialSave = true
             }
@@ -513,13 +519,14 @@ class AppState: ObservableObject {
         }
 
         var needsInitialSave = false
-        if let filetypeItemData = SharedSettings.data(forKey: Key.fileTypes) {
+        if let filetypeItemData = settings[Key.fileTypes] as? Data {
             if let decodedFiles = try? decoder.decode([NewFile].self, from: filetypeItemData) {
                 newFiles = decodedFiles
                 failedKeys.remove(Key.fileTypes)
                 logger.info("load filetype success")
             } else {
                 logger.error("fileTypes 解码失败，保留原值")
+                DiagnosticLog.shared.write("load fileTypes failed")
                 failedKeys.insert(Key.fileTypes)
                 skipInitialSave = true
             }
@@ -531,7 +538,7 @@ class AppState: ObservableObject {
             needsInitialSave = !inExt
         }
 
-        if let appItemData = SharedSettings.data(forKey: Key.apps) {
+        if let appItemData = settings[Key.apps] as? Data {
             if let decodedApps = try? decoder.decode([OpenWithApp].self, from: appItemData) {
                 apps = decodedApps
                 failedKeys.remove(Key.apps)
@@ -539,6 +546,7 @@ class AppState: ObservableObject {
             } else {
                 // 关键：解码失败时不能退回默认列表并落盘，那会把用户数据直接抹掉
                 logger.error("apps 解码失败，保留原值且不写回")
+                DiagnosticLog.shared.write("load apps failed")
                 failedKeys.insert(Key.apps)
                 skipInitialSave = true
             }

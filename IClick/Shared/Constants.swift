@@ -41,10 +41,49 @@ public enum Constants {
     ] + systemDirs
     static let suitName = "group.33WRMMC62L.cn.anwen.IClick"
 
-    /// 检测是否拥有完全磁盘访问权限
+    enum FullDiskAccessStatus {
+        case granted
+        case denied
+        case unknown
+    }
+
+    /// 检测是否拥有完全磁盘访问权限（FDA）。
+    ///
+    /// 没有官方的 TCC 查询 API。业界通行的做法是实际打开一个受 TCC 保护的
+    /// 数据库文件：能读 = 基本可以认为 FDA 已授权；被拒 = 没授权。
+    /// 原来的实现检查 `/Library/Preferences`，那个目录普通用户本来就能读，
+    /// 所以永远返回 true —— 是个假检测。
+    ///
+    /// 注意：这是启发式，不是权威结果；不同 macOS 版本保护的文件可能不同。
+    /// 返回三态而不是 Bool：两个候选文件都不存在时是 `.unknown`，
+    /// 设置页需要把「检测不到」和「明确被拒」区分开。
+    static var fullDiskAccessStatus: FullDiskAccessStatus {
+        let userDB = ("~/Library/Application Support/com.apple.TCC/TCC.db" as NSString).expandingTildeInPath
+        if FileManager.default.fileExists(atPath: userDB) {
+            return canReadProtectedFile(userDB) ? .granted : .denied
+        }
+        // 用户级数据库不存在时退到系统级 TCC.db
+        let systemDB = "/Library/Application Support/com.apple.TCC/TCC.db"
+        if FileManager.default.fileExists(atPath: systemDB) {
+            return canReadProtectedFile(systemDB) ? .granted : .denied
+        }
+        return .unknown
+    }
+
     static var hasFullDiskAccess: Bool {
-        // 尝试访问系统保护目录，如果可以读取则说明有完全磁盘访问权限
-        let testPath = "/Library/Preferences"
-        return FileManager.default.isReadableFile(atPath: testPath)
+        fullDiskAccessStatus == .granted
+    }
+
+    /// 真正打开并读一个字节 —— 只看 `isReadableFile` 不可靠：
+    /// 它不经过 TCC 的读取判定，而且文件存在/权限位可读 ≠ 能读内容。
+    private static func canReadProtectedFile(_ path: String) -> Bool {
+        guard let handle = FileHandle(forReadingAtPath: path) else { return false }
+        defer { try? handle.close() }
+        do {
+            _ = try handle.read(upToCount: 1)
+            return true
+        } catch {
+            return false
+        }
     }
 }

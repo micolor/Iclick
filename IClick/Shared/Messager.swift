@@ -15,23 +15,28 @@ struct MessagePayload: Codable {
     var trigger: String = ""
     /// 配置同步：主应用序列化所有设置数据为 JSON 字符串
     var configJSON: String?
+    /// 可靠投递用的消息 ID。扩展发出动作时生成，主应用处理前回 ack；
+    /// 空字符串表示旧版消息（不 ack、不去重）。
+    var messageID: String = ""
 
     init(
         action: String = "",
         target: [String] = [],
         rid: String = "",
         trigger: String = "",
-        configJSON: String? = nil
+        configJSON: String? = nil,
+        messageID: String = ""
     ) {
         self.action = action
         self.target = target
         self.rid = rid
         self.trigger = trigger
         self.configJSON = configJSON
+        self.messageID = messageID
     }
 
     enum CodingKeys: String, CodingKey {
-        case action, target, rid, trigger, configJSON
+        case action, target, rid, trigger, configJSON, messageID
     }
 
     /// 手写解码，让上面的属性默认值真正生效。
@@ -49,10 +54,11 @@ struct MessagePayload: Codable {
         rid = try container.decodeIfPresent(String.self, forKey: .rid) ?? ""
         trigger = try container.decodeIfPresent(String.self, forKey: .trigger) ?? ""
         configJSON = try container.decodeIfPresent(String.self, forKey: .configJSON)
+        messageID = try container.decodeIfPresent(String.self, forKey: .messageID) ?? ""
     }
 
     public var description: String {
-        return "MessagePayload(action: \(action), target: \(target), rid:\(rid), trigger: \(trigger), hasConfig: \(configJSON != nil))"
+        return "MessagePayload(action: \(action), target: \(target), rid:\(rid), trigger: \(trigger), id:\(messageID), hasConfig: \(configJSON != nil))"
     }
 }
 
@@ -70,6 +76,7 @@ class Messager: @unchecked Sendable {
         let message: String = createMessageData(messagePayload: data)
         // 原来是 warning：心跳每 3 秒一条，等于永久往统一日志写 warning（warning 默认落盘）
         logger.debug("sendMessage to \(name, privacy: .public)")
+        DiagnosticLog.shared.write("send \(name) action=\(data.action) rid=\(data.rid) targets=\(data.target.count)")
         center.postNotificationName(NSNotification.Name(name), object: message, userInfo: nil, deliverImmediately: true)
     }
 
@@ -111,9 +118,11 @@ class Messager: @unchecked Sendable {
     @objc func receivedMessage(_ notification: NSNotification) {
         guard let messageStr = notification.object as? String else {
             logger.warning("received notification with invalid object type")
+            DiagnosticLog.shared.write("recv \(notification.name.rawValue) invalid object type")
             return
         }
         let payload = reconstructEntry(messagePayload: messageStr)
+        DiagnosticLog.shared.write("recv \(notification.name.rawValue) \(payload.description)")
         lock.lock()
         let handler = bus[notification.name.rawValue]
         lock.unlock()

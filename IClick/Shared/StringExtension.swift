@@ -60,23 +60,47 @@ extension Dictionary {
 /// - 主应用（非沙盒）：直接读写真实文件
 /// - 扩展（沙盒）：通过 DistributedNotificationCenter 接收主应用推送的数据
 final class SharedSettings: @unchecked Sendable {
-    /// 共享 plist 文件路径（仅主应用使用，扩展通过通知接收数据）
-    static let sharedURL: URL = {
+    /// 当前用户的真实 home。
+    /// 沙盒进程里的 `NSHomeDirectory()` 是容器路径，不能用来拼真实的
+    /// Application Support / Group Containers，所以统一走 `getpwuid`。
+    static var realHomeURL: URL {
         let realHome: String
         if let pw = getpwuid(getuid()), let dir = pw.pointee.pw_dir {
             realHome = String(cString: dir)
         } else {
             realHome = NSHomeDirectory()
         }
-        let dir = URL(fileURLWithPath: realHome)
-            .appendingPathComponent("Library/Application Support/IClick")
+        return URL(fileURLWithPath: realHome)
+    }
+
+    /// 共享 plist 文件路径（仅主应用写入）
+    static let sharedURL: URL = {
+        let dir = realHomeURL.appendingPathComponent("Library/Application Support/IClick")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir.appendingPathComponent("SharedSettings.plist")
+    }()
+
+    /// 扩展可读的配置快照（App Group 容器）。
+    ///
+    /// 扩展是沙盒进程，读不到 Application Support；主应用每次落盘后同步写一份到
+    /// 群组容器（扩展的 entitlements 里有该 group）。这样扩展启动时立刻就有最新
+    /// 配置，不必等主应用的 DNC 推送——主应用没运行时，右键菜单也不会退化成默认项。
+    static let snapshotURL: URL = {
+        realHomeURL
+            .appendingPathComponent("Library/Group Containers")
+            .appendingPathComponent(Constants.suitName)
+            .appendingPathComponent("SharedSettings-snapshot.plist")
     }()
 
     /// 扩展通过通知接收的远程数据（沙盒内无法直接读文件时使用）
     nonisolated(unsafe) static var remotePayload: [String: Any]?
     private static let lock = NSLock()
+
+    /// 群组容器快照的内存缓存。扩展每读一个 key 都重新解析 plist 太浪费，
+    /// 尤其是主应用没运行时（remotePayload 为空），右键构建菜单会连续读十几项。
+    /// 用 mtime 判断是否失效：主应用原子写入后 mtime 会变，下一次读取自然会重新加载。
+    nonisolated(unsafe) private static var snapshotCache: [String: Any]?
+    nonisolated(unsafe) private static var snapshotStamp: Date?
 
     /// 是否为扩展进程（通过 bundle ID 判断）
     static var isExtension: Bool {
@@ -92,14 +116,53 @@ final class SharedSettings: @unchecked Sendable {
 
     /// 已持锁版本的 load()。NSLock 不可重入，凡是已经拿锁的路径都必须走这个。
     private static func loadLocked() -> [String: Any] {
-        // 扩展优先使用远程推送的数据
+        // 扩展优先使用远程推送的数据（最新），其次读群组容器里的快照（主应用落盘时同步写）
         if isExtension, let remote = remotePayload {
             return remote
+        }
+        if isExtension, let dict = loadSnapshotLocked() {
+            return dict
         }
         if let dict = NSDictionary(contentsOf: sharedURL) as? [String: Any] {
             return dict
         }
         return [:]
+    }
+
+    /// 扩展启动时先把快照当作远程配置。
+    ///
+    /// 这样后续 `AppState.load()`、菜单里的 submenu_name/icon 读取都走内存，
+    /// 不再每读一个 key 就解析一遍 5KB plist。主应用稍后推来的配置会覆盖它。
+    static func adoptSnapshotIfNeeded() {
+        guard isExtension else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        guard remotePayload == nil, let dict = loadSnapshotLocked() else { return }
+        remotePayload = dict
+    }
+
+    /// 读取快照（按 mtime 缓存），供扩展在每次建菜单前比较配置版本。
+    static func snapshotDictionary() -> [String: Any]? {
+        lock.lock()
+        defer { lock.unlock() }
+        return loadSnapshotLocked()
+    }
+
+    /// 必须已持锁调用。
+    private static func loadSnapshotLocked() -> [String: Any]? {
+        let attrs = try? FileManager.default.attributesOfItem(atPath: snapshotURL.path)
+        let stamp = attrs?[.modificationDate] as? Date
+        if let cached = snapshotCache, let stamp, stamp == snapshotStamp {
+            return cached
+        }
+        guard let dict = NSDictionary(contentsOf: snapshotURL) as? [String: Any] else {
+            snapshotCache = nil
+            snapshotStamp = nil
+            return nil
+        }
+        snapshotCache = dict
+        snapshotStamp = stamp
+        return dict
     }
 
     /// 保存（仅主应用写入文件）
@@ -114,7 +177,16 @@ final class SharedSettings: @unchecked Sendable {
         // 扩展是只读消费者：绝不写共享 plist，避免用旧 remotePayload 快照整文件回写
         // 覆盖主应用的配置（会导致 _migrated_to_shared_suite 标志丢失 → 迁移重跑 → 配置被旧值顶掉）
         if isExtension { return }
+
         (dict as NSDictionary).write(to: sharedURL, atomically: true)
+
+        // 同步写一份扩展能读的群组容器快照。扩展启动时用它初始化菜单，
+        // 不再依赖「主应用已经运行并推送过配置」。
+        let snapshotDir = snapshotURL.deletingLastPathComponent()
+        try? FileManager.default.createDirectory(at: snapshotDir, withIntermediateDirectories: true)
+        if !(dict as NSDictionary).write(to: snapshotURL, atomically: true) {
+            logger.warning("写入扩展配置快照失败: \(snapshotURL.path, privacy: .public)")
+        }
     }
 
     /// 接收远程配置（扩展使用），将 base64 字符串还原为 Data

@@ -73,6 +73,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     var appState: AppState = .shared
     private var isProcessingDelete = false
+    /// 可靠投递去重：扩展在没收到 ack 时会重发同一条动作消息。
+    private var processedMessages = MessageDeduplicator()
+    /// 扩展 → 主应用的认证 IPC 服务。
+    private var ipcServer: LocalIPCServer?
 
     /// 扩展进程的 bundle id（扩展是独立进程，可以用本地查询判断存活）
     private static let extensionBundleID = "cn.anwen.IClick.FinderSyncExt"
@@ -140,6 +144,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // 与 applicationShouldTerminateAfterLastWindowClosed 返回 false 是两件事：
         // 那个只管「关掉最后一个窗口」，这个管「系统在空闲时把无窗口进程收走」。
         ProcessInfo.processInfo.disableAutomaticTermination("IClick 需要常驻以服务 Finder 扩展")
+        DiagnosticLog.shared.installCrashHandlers()
 
         // 通知权限：UserNotifications 必须显式授权，否则投递会被静默丢弃。
         // 只在启动时请求一次，系统自身会记住用户的决定。
@@ -158,6 +163,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // 诊断：登录项状态与当前 bundle 路径。
         let currentBundlePath = Bundle.main.bundleURL.path
         logger.info("登录项: enabled=\(LaunchAtLogin.isEnabled), bundle=\(currentBundlePath)")
+        DiagnosticLog.shared.write(
+            "app launch version=\(Constants.appVersion) bundle=\(currentBundlePath) "
+            + "extensionLaunch=\(Self.launchedByExtension) loginLaunch=\(LaunchAtLogin.wasLaunchedAtLogin) "
+            + "showInDock=\(showInDock) fda=\(Constants.hasFullDiskAccess)"
+        )
 
         // 登录项按「注册时的 bundle 路径」保存。应用从 DerivedData 挪到 /Applications
         // （或反过来）后，系统仍报告「已启用」，但登录时拉起的是旧路径。旧副本会写同一份
@@ -184,26 +194,29 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
+        // DNC 只保留非敏感的配置请求。动作消息改走认证的本机 socket
+        // （LocalIPCServer + 对端代码签名校验），否则任何本地进程都能伪造
+        // 一条 open/delete 让 IClick 去执行。
         messager.on(name: Key.messageFromFinder) { payload in
             self.logger.info("recive mess from finder by app \(payload.description)")
             switch payload.action {
-            case "open":
-                self.openApp(rid: payload.rid, target: payload.target)
-            case "actioning":
-                self.actionHandler(rid: payload.rid, target: payload.target, trigger: payload.trigger)
-            case "Create File":
-                self.createFile(rid: payload.rid, target: payload.target)
-            case "common-dirs":
-                self.openCommonDirs(target: payload.target)
             case "heartbeat":
                 // 响应时发送完整配置数据，确保扩展有最新设置
                 self.sendConfigToExtension()
-            case "authorize-dir":
-                self.authorizeDir(target: payload.target)
             default:
-                self.logger.warning("actioning payload no matched")
+                self.logger.warning("忽略未经认证的 DNC 动作: \(payload.action)")
+                DiagnosticLog.shared.write("ignored dnc action=\(payload.action) rid=\(payload.rid)")
             }
         }
+
+        let server = LocalIPCServer { [weak self] payload in
+            Task { @MainActor in
+                self?.handleActionPayload(payload)
+            }
+        }
+        server.start()
+        ipcServer = server
+
         sendObserveDirMessage()
 
         // 用户自己启动（Finder 双击 / 启动台 / open）时把设置窗口打开。
@@ -219,6 +232,33 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.async { [weak self] in
                 self?.openSettingsWindowFromMenu()
             }
+        }
+    }
+
+    /// 处理经认证 socket 送来的动作。
+    /// DNC 通道不处理这些动作：它不校验发送方。
+    @MainActor
+    private func handleActionPayload(_ payload: MessagePayload) {
+        DiagnosticLog.shared.write("ipc action=\(payload.action) rid=\(payload.rid) targets=\(payload.target.count)")
+        if !payload.messageID.isEmpty, !processedMessages.accept(payload.messageID) {
+            DiagnosticLog.shared.write("duplicate \(payload.messageID) action=\(payload.action)")
+            return
+        }
+        switch payload.action {
+        case "open":
+            openApp(rid: payload.rid, target: payload.target)
+        case "actioning":
+            actionHandler(rid: payload.rid, target: payload.target, trigger: payload.trigger)
+        case "Create File":
+            createFile(rid: payload.rid, target: payload.target)
+        case "common-dirs":
+            openCommonDirs(target: payload.target)
+        case "authorize-dir":
+            authorizeDir(target: payload.target)
+        case "ping":
+            DiagnosticLog.shared.write("ipc ping received")
+        default:
+            logger.warning("ipc action no matched: \(payload.action)")
         }
     }
 
@@ -299,6 +339,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue else {
             logger.warning("路径不存在或不是目录: \(path, privacy: .public)")
+            DiagnosticLog.shared.write("open-dir missing path=\(path)")
             return false
         }
 
@@ -318,8 +359,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             if task.terminationStatus == 0 {
                 return true
             }
+            DiagnosticLog.shared.write("open-dir failed path=\(path) exit=\(task.terminationStatus)")
         } catch {
             logger.error("打开目录失败 \(path, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            DiagnosticLog.shared.write(
+                "open-dir failed path=\(path) err=\((error as NSError).code) \(error.localizedDescription)"
+            )
         }
         return false
     }
@@ -639,6 +684,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             contents = try FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil, options: [.skipsPackageDescendants])
         } catch {
             logger.warning("读取目录内容失败: \(dir.path), error: \(error.localizedDescription)")
+            DiagnosticLog.shared.write(
+                "dir-hidden read failed dir=\(dir.path) err=\((error as NSError).code) \(error.localizedDescription)"
+            )
             return false
         }
 
@@ -647,6 +695,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // 就会中止整个循环，后面的条目一个都不处理；而且失败只打 .debug
         // （默认不落盘），用户看到的就是「点了没反应」。现在逐项兜住并汇报失败数。
         var failed = 0
+        var firstError: Error?
         for case var fileURL in contents {
             var values = URLResourceValues()
             values.isHidden = hidden
@@ -654,10 +703,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 try fileURL.setResourceValues(values)
             } catch {
                 failed += 1
+                if firstError == nil { firstError = error }
             }
         }
         if failed > 0 {
             logger.warning("目录内容设置失败 \(failed)/\(contents.count) 项: \(dir.path)")
+            let detail = firstError.map {
+                " err=\(($0 as NSError).code) \($0.localizedDescription)"
+            } ?? ""
+            DiagnosticLog.shared.write(
+                "dir-hidden failed dir=\(dir.path) hidden=\(hidden) failed=\(failed)/\(contents.count)\(detail)"
+            )
             return false
         }
         return true
@@ -680,7 +736,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             try fileURL.setResourceValues(values)
             return true
         } catch {
-            logger.debug("setResourceValues 失败: \(path), error: \(error.localizedDescription)")
+            logger.warning("setResourceValues 失败: \(path), error: \(error.localizedDescription)")
+            // 隐藏标志要改父目录 / 文件本身，TCC、只读卷、权限不足都会走这里。
+            // 以前只打 .debug（默认不落盘），用户看到的就是「点了没反应」。
+            DiagnosticLog.shared.write(
+                "hidden failed path=\(path) hidden=\(hidden) err=\((error as NSError).code) \(error.localizedDescription)"
+            )
             return false
         }
     }
@@ -845,6 +906,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             } catch {
                 failCount += 1
                 logger.error("\(isCutOperation ? "移动" : "复制")失败: \(filePath) -> \(error.localizedDescription)")
+                DiagnosticLog.shared.write(
+                    "paste failed op=\(isCutOperation ? "move" : "copy") path=\(filePath) "
+                    + "dest=\(finalURL.path) err=\((error as NSError).code) \(error.localizedDescription)"
+                )
             }
         }
 
@@ -912,6 +977,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 continue
             } catch {
                 logger.warning("移入废纸篓失败，回退 Finder: \(decodedPath), error: \(error.localizedDescription)")
+                DiagnosticLog.shared.write(
+                    "trash failed path=\(decodedPath) err=\((error as NSError).code) \(error.localizedDescription)"
+                )
             }
 
             // 2. 通过 AppleScript 让 Finder 删除（同样进废纸篓）
@@ -921,6 +989,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
 
             failedItems.append(decodedPath)
+            DiagnosticLog.shared.write("delete failed path=\(decodedPath)")
         }
 
         // 3. 两条路径都失败时明确告知用户，不再静默失败
@@ -1005,9 +1074,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 try Data().write(to: fileURL)
             }
             logger.info("已创建文件: \(fileURL.path)")
+            DiagnosticLog.shared.write("create ok \(fileURL.path)")
             return true
         } catch {
             logger.error("文件创建失败: \(fileURL.path), error: \(error.localizedDescription)")
+            DiagnosticLog.shared.write("create failed \(fileURL.path) error=\(error.localizedDescription)")
             return false
         }
     }
@@ -1029,6 +1100,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         guard let rcitem else {
             logger.warning("openApp: app not found \(rid)")
+            DiagnosticLog.shared.write("open not-found rid=\(rid)")
             // 重读磁盘后仍然找不到：说明配置里已经没有这个 App（被删掉，或菜单是
             // 很久以前的旧快照）。只写日志用户只会看到「点了没反应」，给一条通知。
             deliverNotification(
@@ -1051,6 +1123,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let bundleID = readBundleIdentifier(from: appURL)
         let log = logger
         logger.info("打开目录: \(dir.path), 应用: \(appName), bundleID: \(bundleID ?? "nil")")
+        DiagnosticLog.shared.write("open app=\(appName) dir=\(dir.path)")
 
         let config = NSWorkspace.OpenConfiguration()
         config.promptsUserIfNeeded = false
@@ -1061,6 +1134,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NSWorkspace.shared.openApplication(at: appURL, configuration: config) { runningApp, error in
             if let error = error {
                 log.error("启动应用失败: \(appName), \(error.localizedDescription)")
+                DiagnosticLog.shared.write("open failed app=\(appName) error=\(error.localizedDescription)")
                 // 应用被移动/删除、或签名损坏时会走到这里。原来只有日志，
                 // 用户看到的是「点了没反应」。
                 Self.postUserNotification(
@@ -1070,6 +1144,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
             log.info("应用已启动: \(runningApp?.localizedName ?? appName)")
+            DiagnosticLog.shared.write("open launched app=\(appName)")
 
             // Step 2: 应用已运行，用 open 发送目录——此时不会触发 Cryptexes 可执行文件访问
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
@@ -1085,9 +1160,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                         log.info("成功在 \(appName) 中打开: \(dir.path)")
                     } else {
                         log.error("发送目录失败, exit code: \(proc.terminationStatus)")
+                        DiagnosticLog.shared.write(
+                            "open-dir send failed app=\(appName) dir=\(dir.path) exit=\(proc.terminationStatus)"
+                        )
                     }
                 }
-                try? process.run()
+                do {
+                    try process.run()
+                } catch {
+                    log.error("启动 /usr/bin/open 失败: \(error.localizedDescription)")
+                    DiagnosticLog.shared.write(
+                        "open-dir spawn failed app=\(appName) dir=\(dir.path) err=\((error as NSError).code)"
+                    )
+                }
             }
         }
     }
@@ -1150,6 +1235,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        ipcServer?.stop()
         messager.sendMessage(name: Key.hostQuit, data: MessagePayload(action: "quit", target: [], trigger: "unknown"))
         logger.info("applicationWillTerminate")
     }

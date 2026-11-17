@@ -20,6 +20,7 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
     /// 主应用 bundle id（用于在扩展内按需拉起 / 判断其是否在运行）
     private static let hostBundleID = "cn.anwen.IClick"
 
+
     lazy var appState: AppState = {
         MainActor.assumeIsolated { AppState(inExt: true) }
     }()
@@ -51,10 +52,14 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
 
     override init() {
         super.init()
+        // 主应用没运行时 remotePayload 为空；先把快照放进内存，
+        // 避免接下来初始化/建菜单时每读一个 key 都重新解析 plist。
+        SharedSettings.adoptSnapshotIfNeeded()
         refreshDataVersion()
 
         // 清除菜单缓存，确保新逻辑生效
         invalidateMenuCache()
+        DiagnosticLog.shared.installCrashHandlers()
 
         FIFinderSyncController.default().directoryURLs = [myFolderURL]
         logger.info("FinderSync launched from \(Bundle.main.bundlePath, privacy: .public)")
@@ -91,6 +96,9 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
                 self.refreshDataVersion()
                 if self.currentDataVersion() != oldVersion {
                     self.appState.refresh()
+                    DiagnosticLog.shared.write(
+                        "config refreshed version=\(self.currentDataVersion()) apps=\(self.appState.apps.count)"
+                    )
                     self.invalidateMenuStructure()
                 }
             }
@@ -98,6 +106,22 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
 
         // 扩展启动时主应用可能已经在跑了（它没机会给我们推 "running"），本地实测一次
         isHostAppOpen = Self.hostAppIsRunning
+        // 注意：这里不要碰 appState —— 它是 lazy + MainActor.assumeIsolated，
+        // 而扩展的 init 不保证在主线程；只记录快照文件是否存在。
+        DiagnosticLog.shared.write(
+            "extension init hostRunning=\(isHostAppOpen) "
+            + "snapshot=\(FileManager.default.fileExists(atPath: SharedSettings.snapshotURL.path))"
+        )
+
+        // 自检认证 IPC：从沙盒扩展里连一次 socket，确认 application-groups 下的
+        // Unix socket + 对端签名校验都工作。结果只写诊断日志，不影响正常使用。
+        if isHostAppOpen {
+            let ping = MessagePayload(action: "ping", messageID: UUID().uuidString)
+            DispatchQueue.global(qos: .utility).async {
+                let ok = LocalIPCClient.send(ping)
+                DiagnosticLog.shared.write("ipc ping \(ok ? "ok" : "failed")")
+            }
+        }
 
         // 向主应用请求配置，重试直到收到响应
         requestConfigFromApp(retry: 0)
@@ -126,29 +150,40 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
         return isHostAppOpen
     }
 
-    /// 发送消息到主应用；若主应用不在运行，先拉起再等就绪后重发。
-    /// DNC 消息是"发出即忘"的，主应用未注册观察者时消息会丢失，因此必须等它就绪。
+    /// 发送动作消息到主应用。
+    ///
+    /// 走 App Group 容器里的 Unix socket；主应用会校验对端的代码签名。
+    /// 主应用没就绪时先拉起并重试；socket 的响应就是 ack，主应用按
+    /// messageID 去重，所以 ack 丢了导致的重复发送不会重复执行动作。
     private func sendMessageToHost(_ payload: MessagePayload) {
-        if isHostReady {
-            messager.sendMessage(name: Key.messageFromFinder, data: payload)
+        var payload = payload
+        if payload.messageID.isEmpty {
+            payload.messageID = UUID().uuidString
+        }
+        deliverViaIPC(payload, attempt: 0)
+    }
+
+    private func deliverViaIPC(_ payload: MessagePayload, attempt: Int) {
+        if isHostReady, LocalIPCClient.send(payload) {
+            DiagnosticLog.shared.write("ipc sent id=\(payload.messageID) action=\(payload.action)")
             return
         }
-        logger.warning("主应用未运行，尝试拉起并重发消息: \(payload.action)")
-        launchHostApp()
-        func retry(attempt: Int) {
-            // 最多等待约 6 秒（20 * 0.3s）
-            if attempt > 20 {
-                logger.warning("等待主应用就绪超时，仍发送一次（可能丢失）: \(payload.action)")
-                messager.sendMessage(name: Key.messageFromFinder, data: payload)
-                return
-            }
-            if isHostReady {
-                messager.sendMessage(name: Key.messageFromFinder, data: payload)
-            } else {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { retry(attempt: attempt + 1) }
-            }
+
+        if attempt == 0 {
+            logger.warning("主应用未就绪或本机 IPC 暂不可用，拉起并重试: \(payload.action)")
+            launchHostApp()
         }
-        retry(attempt: 0)
+
+        // 主应用已在跑但 socket 没就绪时，给几次重试；没在跑时最多等约 6 秒。
+        let maxAttempts = isHostReady ? 3 : 20
+        guard attempt < maxAttempts else {
+            logger.error("本机 IPC 发送失败: \(payload.action)")
+            DiagnosticLog.shared.write("ipc failed id=\(payload.messageID) action=\(payload.action)")
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            self?.deliverViaIPC(payload, attempt: attempt + 1)
+        }
     }
 
     /// 拉起主应用。
@@ -184,6 +219,7 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
         let configuration = NSWorkspace.OpenConfiguration()
         // 告诉主应用这次是扩展拉起的：它不应该把设置窗口弹到用户面前。
         configuration.arguments = ["--launched-by-extension"]
+        DiagnosticLog.shared.write("launch host \(appURL.path)")
 
         NSWorkspace.shared.openApplication(at: appURL, configuration: configuration) { _, error in
             if let error {
@@ -244,6 +280,22 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
         cachedDataVersion = SharedSettings.integer(forKey: Key.configVersion)
     }
 
+    /// DNC 推送丢了也不怕：快照里的版本更新就重新加载。
+    /// 每次右键建菜单前调用一次（读一个 5KB 的 plist，成本可接受）。
+    @MainActor
+    private func syncFromSnapshotIfNewer() {
+        guard let dict = SharedSettings.snapshotDictionary(),
+              let snapshotVersion = dict[Key.configVersion] as? Int,
+              snapshotVersion > currentDataVersion() else {
+            return
+        }
+        SharedSettings.receiveRemote(dict)
+        refreshDataVersion()
+        appState.refresh()
+        invalidateMenuStructure()
+        DiagnosticLog.shared.write("config reloaded from snapshot version=\(snapshotVersion)")
+    }
+
     // MARK: - Primary Finder Sync protocol methods
 
     override func beginObservingDirectory(at url: URL) {
@@ -294,6 +346,12 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
         // 缓存当前选中的文件 URL（macOS 15 上点击时 selectedItemURLs 可能返回 nil）
         cachedSelectedURLs = FIFinderSyncController.default().selectedItemURLs()
         cachedTargetURL = FIFinderSyncController.default().targetedURL()
+
+        // DNC 推送可能丢。每次建菜单前对比一下群组容器快照里的配置版本：
+        // 快照更新就重新读，保证最迟在下次右键时看到最新配置。
+        MainActor.assumeIsolated {
+            syncFromSnapshotIfNewer()
+        }
 
         let dataVersion = currentDataVersion()
         let cacheKey = menuCacheKey(menuKind, version: dataVersion)
