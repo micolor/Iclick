@@ -10,7 +10,6 @@ import FinderSync
 import SwiftUI
 
 struct AboutSettingsTabView: View {
-    let messager = Messager.shared
     @EnvironmentObject var updateManager: UpdateManager
 
     var body: some View {

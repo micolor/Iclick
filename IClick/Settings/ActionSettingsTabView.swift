@@ -54,7 +54,6 @@ struct ActionSettingsTabView: View {
     @State private var editingSubmenu: SubmenuEditInfo? = nil
     @State private var showAddSheet = false
 
-    let messager = Messager.shared
 
     /// 可恢复的操作项（预定义中不在列表中的）
     private var availableActions: [RCAction] {

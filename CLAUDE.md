@@ -12,7 +12,8 @@ IClick is a macOS desktop application that extends Finder's context menu with cu
 - AppKit (system integration only, no UI)
 - plist-backed `SharedSettings` (persistence — see `IClick/Shared/StringExtension.swift`)
 - FinderSync framework (Finder extension)
-- DistributedNotificationCenter (inter-process communication)
+- App Group Unix domain socket IPC (extension → app actions, with peer signature checks)
+- App Group config snapshot (app → extension configuration)
 - Xcode 16+ (required for development)
 
 ## Architecture
@@ -29,15 +30,21 @@ IClick follows a dual-process architecture:
 ### 2. FinderSync Extension (`FinderSyncExt/`)
 - Runs as a separate process, injected into Finder
 - Injects custom context menu items into Finder
-- Communicates with main app via `Messager` class
+- Sends actions to the main app via `LocalIPC` (Unix socket + peer signature validation)
+- Reads configuration from the App Group snapshot; watches `configVersion` per menu build
 - Entry point: [FinderSyncExt.swift](FinderSyncExt/FinderSyncExt.swift)
 
 ### 3. Communication Layer
-The main app and extension communicate via `DistributedNotificationCenter`:
-- **Extension → App**: `IClick.MessageFromFinder` (actions, file operations)
-- **App → Extension**: `IClick.MessageFromApp` (menu updates, config changes)
-- Protocol defined in: [specs/001-macos-app-macos/contracts/app-extension-communication.md](specs/001-macos-app-macos/contracts/app-extension-communication.md)
-- Implementation: [Messager.swift](IClick/Shared/Messager.swift)
+- **Extension → App**: `LocalIPCServer` / `LocalIPCClient`
+  ([LocalIPC.swift](IClick/Shared/LocalIPC.swift)); the app accepts only a peer whose
+  signing identifier is `cn.anwen.IClick.FinderSyncExt` and Team ID is `33WRMMC62L`.
+- **App → Extension**: no notification channel. The app writes
+  `SharedSettings-snapshot.plist` in the App Group container and increments
+  `ICLICK_CONFIG_VERSION`; the extension reloads when it sees a newer version.
+- `MessagePayload` (in [Messager.swift](IClick/Shared/Messager.swift)) is the shared
+  Codable message shape for IPC.
+- Historical protocol notes: [specs/001-macos-app-macos/contracts/app-extension-communication.md](specs/001-macos-app-macos/contracts/app-extension-communication.md)
+  (superseded by LocalIPC + snapshot).
 
 ### 4. State Management
 - **AppState**: Centralized `ObservableObject` managing all app state
@@ -132,7 +139,10 @@ See `deleteFolderFile()` and `doCreateFile()` in [IClickApp.swift](IClick/IClick
 ### Extension Development
 - Extension runs in separate process with limited memory
 - Must handle `isHostAppOpen` state - don't block if main app not available
-- Use heartbeat mechanism to verify main app is running
+- Liveness is a local `NSWorkspace.runningApplications` query; there is no heartbeat
+- Configuration comes from the App Group snapshot; bump `configVersion` when it changes
+- The extension target deliberately excludes app-only `Shared/*.swift` files
+  (`Updater`, `UpdaterView`, `LaunchAtLogin`, `Extension+`) so it does not link SwiftUI
 - See [FinderSyncExt.swift](FinderSyncExt/FinderSyncExt.swift)
 
 ### Logging
@@ -145,8 +155,8 @@ See `deleteFolderFile()` and `doCreateFile()` in [IClickApp.swift](IClick/IClick
 - Everything goes through `SharedSettings` ([StringExtension.swift](IClick/Shared/StringExtension.swift)),
   a plist at `~/Library/Application Support/IClick/SharedSettings.plist`
 - **Single writer**: only the main app writes. `SharedSettings.set`/`save` are no-ops when
-  `isExtension` is true; the extension consumes a snapshot the app pushes over IPC
-  (`remotePayload`). Never let the extension write this file.
+  `isExtension` is true; the extension reads the App Group snapshot and adopts it into
+  memory on launch (`adoptSnapshotIfNeeded`). Never let the extension write this file.
 - Migrations (`migrateFromLegacyIfNeeded`) must **fill missing keys only, never overwrite**,
   and must read their sentinel with `object(forKey:)` — `string(forKey:)` returns nil for a `Bool`
 - `AppState.load()` decodes each section independently; a corrupt section must never fall back to
@@ -174,9 +184,10 @@ IClick/
 ## Common Issues
 
 ### Extension Not Loading
-- Ensure extension is enabled in System Settings → Privacy & Security → Extensions
-- Check that `FIFinderSyncController.default().directoryURLs` is set
-- Verify heartbeat messages are being sent/received
+- Ensure extension is enabled in System Settings → General → Login Items & Extensions → Finder Extensions
+- Check that `FIFinderSyncController.default().directoryURLs` is `["/"]`
+- Verify the App Group snapshot exists and carries a recent `ICLICK_CONFIG_VERSION`
+- Verify `ipc.sock` exists and the app log shows the peer's bundle/team on connect
 
 ### Context Menu Shows Up Twice
 - Two `FinderSyncExt` processes are running. This is a LaunchServices registration problem,
@@ -186,11 +197,12 @@ IClick/
 - Kill leftover processes and relaunch Finder afterwards
 
 ### Config Changes Not Reaching the Extension
-- The extension is a read-only consumer; it only sees what the app pushes
-- `SharedSettings.set` does not notify anyone by itself — call `appState.sync()` (or
+- The extension is a read-only consumer; it only sees what the app wrote into the snapshot
+- `SharedSettings.set` does not bump the version by itself — call `appState.sync()` (or
   `notifyConfigChanged()`) after writing, or the menu keeps showing stale data
-- `submenu_icon_*` / `submenu_name_*` are read by the extension directly from the pushed
-  payload, so they need the same push
+- `notifyConfigChanged()` is debounced (80 ms) and only bumps `ICLICK_CONFIG_VERSION`;
+  the extension notices the higher version on its next menu build and reloads the snapshot
+- `submenu_icon_*` / `submenu_name_*` come from the same snapshot, so they need the bump too
 
 ### SwiftUI Views Not Updating
 - Ensure `@MainActor` annotation when updating `@Published` properties

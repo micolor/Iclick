@@ -22,7 +22,6 @@ struct IClickApp: App {
 
     @AppLog(category: "main")
     private var logger
-    let messager = Messager.shared
 
     @StateObject var appState = AppState.shared
 
@@ -78,28 +77,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// 扩展 → 主应用的认证 IPC 服务。
     private var ipcServer: LocalIPCServer?
 
-    /// 扩展进程的 bundle id（扩展是独立进程，可以用本地查询判断存活）
-    private static let extensionBundleID = "cn.anwen.IClick.FinderSyncExt"
-
-    /// 扩展进程当前是否在运行。
-    ///
-    /// 这里原本判断的是「最后一次收到扩展心跳是否在 10 秒内」。但扩展现在只在
-    /// 启动握手时发心跳（`requestConfigFromApp` 一旦拿到配置就停），所以主应用
-    /// 启动超过 10 秒后这个判断恒为 false —— 于是每次启动主应用，
-    /// `deliverRunningWithRetry` 都会跑满 5 次重试、把同一份完整配置白发 6 遍
-    /// （约 25KB），最后再打一条「配置推送重试已达上限」的 error。
-    /// 统一日志实测每次启动必现（5 次启动 5 条，PID 各不相同）。
-    ///
-    /// 改成直接查进程：主应用无沙盒，`runningApplications` 能看到扩展进程。
-    /// 这样「扩展还没起来就重试」的原意得以保留，扩展已在跑时则一次即达。
-    ///
-    /// 注意别换回通知式的判断：本机 NSWorkspace 的启动/退出通知从不触发，
-    /// 只有这个即时查询是可靠的（扩展那边也用同一招）。
-    var pluginRunning: Bool {
-        NSWorkspace.shared.runningApplications.contains { $0.bundleIdentifier == Self.extensionBundleID }
-    }
-
-    let messager = Messager.shared
     var showInDock = SharedSettings.bool(forKey: Key.showInDock)
 
     /// 发送用户通知。
@@ -194,21 +171,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        // DNC 只保留非敏感的配置请求。动作消息改走认证的本机 socket
-        // （LocalIPCServer + 对端代码签名校验），否则任何本地进程都能伪造
-        // 一条 open/delete 让 IClick 去执行。
-        messager.on(name: Key.messageFromFinder) { payload in
-            self.logger.info("recive mess from finder by app \(payload.description)")
-            switch payload.action {
-            case "heartbeat":
-                // 响应时发送完整配置数据，确保扩展有最新设置
-                self.sendConfigToExtension()
-            default:
-                self.logger.warning("忽略未经认证的 DNC 动作: \(payload.action)")
-                DiagnosticLog.shared.write("ignored dnc action=\(payload.action) rid=\(payload.rid)")
-            }
-        }
-
+        // 动作与配置都不再走 DNC：动作用认证的本机 socket，配置由扩展直接读快照。
+        // DNC 不校验发送方，保留监听只会给伪造消息留入口。
         let server = LocalIPCServer { [weak self] payload in
             Task { @MainActor in
                 self?.handleActionPayload(payload)
@@ -216,8 +180,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         server.start()
         ipcServer = server
-
-        sendObserveDirMessage()
 
         // 用户自己启动（Finder 双击 / 启动台 / open）时把设置窗口打开。
         //
@@ -387,7 +349,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     ///    在批量删除的循环里就是 N 次编译 + N 次 Finder IPC，全部压在主线程上。
     ///
     /// 线程说明：NSAppleScript 不是线程安全的。这里只由 `deleteFolderFile` 调用，
-    /// 而它经 `Messager` 的 `DispatchQueue.main.async` 进来，始终在主线程串行执行。
+    /// 而动作经 IPC 进入后已切到 MainActor，始终在主线程串行执行。
     private static let finderDeleteScript: NSAppleScript? = {
         // `set f to POSIX file p` 必须留在 tell 块**外面**。
         // 写成 `tell application "Finder" to delete (POSIX file p)` 时，AppleScript 会把
@@ -463,75 +425,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 self.appState.dirs.append(PermissiveDir(permUrl: url))
                 try? self.appState.savePermissiveDir()
 
-                // 主应用无沙盒，始终观察整个文件系统
-                self.messager.sendMessage(name: Key.hostRunning, data: self.buildRunningPayload(target: ["/"]))
                 self.logger.info("已注册目录: \(path)")
                 completion?(true)
             } else {
                 completion?(false)
             }
         }
-    }
-
-    /// 重试计数。只在「开始一次新的推送序列」时复位。
-    /// 不复位的话，上一次把 5 次耗尽之后，后续任何调用都不会再安排重试，
-    /// 扩展先于主应用启动时就会永远收不到配置。
-    private var observeRetryCount = 0
-
-    /// 开始观测并推送配置（有限次重试，等待扩展就绪）
-    func sendObserveDirMessage() {
-        observeRetryCount = 0
-        deliverRunningWithRetry()
-    }
-
-    /// 向扩展推送当前配置
-    func sendConfigToExtension() {
-        observeRetryCount = 0
-        if pluginRunning {
-            // 扩展刚回过心跳，一次即达
-            sendRunningMessage()
-        } else {
-            deliverRunningWithRetry()
-        }
-    }
-
-    /// 单次「running」消息：主应用无沙盒，始终观察整个文件系统
-    private func sendRunningMessage() {
-        messager.sendMessage(name: Key.hostRunning, data: buildRunningPayload(target: ["/"]))
-    }
-
-    /// 推送配置，未收到心跳时每 3 秒重试，最多 5 次
-    private func deliverRunningWithRetry() {
-        sendRunningMessage()
-
-        // 扩展已回心跳 → 配置已送达，无需继续重试
-        guard !pluginRunning else {
-            observeRetryCount = 0
-            return
-        }
-        guard observeRetryCount < 5 else {
-            logger.warning("配置推送重试已达上限，放弃")
-            return
-        }
-        observeRetryCount += 1
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
-            self?.deliverRunningWithRetry()
-        }
-    }
-
-    /// 构建包含配置数据的 running 消息
-    private func buildRunningPayload(target: [String]) -> MessagePayload {
-        // 序列化 SharedSettings 为 JSON（Data 值转 base64）
-        let allConfig = SharedSettings.exportAllForIPC()
-        let configJSON: String?
-        if let jsonData = try? JSONSerialization.data(withJSONObject: allConfig, options: .fragmentsAllowed),
-           let jsonStr = String(data: jsonData, encoding: .utf8) {
-            configJSON = jsonStr
-        } else {
-            logger.warning("Failed to serialize config for IPC")
-            configJSON = nil
-        }
-        return MessagePayload(action: "running", target: target, configJSON: configJSON)
     }
 
     func actionHandler(rid: String, target: [String], trigger: String) {
@@ -1236,7 +1135,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         ipcServer?.stop()
-        messager.sendMessage(name: Key.hostQuit, data: MessagePayload(action: "quit", target: [], trigger: "unknown"))
         logger.info("applicationWillTerminate")
     }
 

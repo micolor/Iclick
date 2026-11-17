@@ -13,9 +13,9 @@ import OSLog
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "IClick", category: "FinderOpen")
 
 class FinderSyncExt: FIFinderSync, @unchecked Sendable {
-    var myFolderURL = URL(fileURLWithPath: "/Users/")
-    /// 主应用是否已就绪（进程在运行 **且** 它的消息观察者已注册）。
-    /// 由主应用推来的 "running" 置 true、"quit" 置 false；读取请用 isHostReady，它会兜底校正过期值。
+    var myFolderURL = URL(fileURLWithPath: "/")
+    /// 主应用进程是否在运行。只由本地 `NSWorkspace.runningApplications` 查询维护，
+    /// 不再依赖 DNC 的 running/quit 消息（DNC 不校验发送方）。
     private var isHostAppOpen = false
     /// 主应用 bundle id（用于在扩展内按需拉起 / 判断其是否在运行）
     private static let hostBundleID = "cn.anwen.IClick"
@@ -24,8 +24,6 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
     lazy var appState: AppState = {
         MainActor.assumeIsolated { AppState(inExt: true) }
     }()
-
-    let messager = Messager.shared
 
     var triggerManKind = FIMenuKind.contextualMenuForContainer
 
@@ -38,16 +36,23 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
     private var cachedMenus: [String: NSMenu] = [:]
     // 每个缓存键对应的数据版本号
     private var cachedDataVersions: [String: Int] = [:]
+    // 缓存上限：每个 NSMenu 都持有菜单项和图标，选中数量变化时不应无限累积
+    private let maxCachedMenus = 16
+    private var menuCacheOrder: [String] = []
 
     // 文件图标缓存（按路径）
     private var iconCache: [String: NSImage] = [:]
     // SF Symbol 图标缓存（按 "name:colorHex:size" 键）
     private var sfSymbolCache: [String: NSImage] = [:]
+    // 已缩放到菜单尺寸的图标缓存（系统图标/自定义文件图标）
+    private var resizedIconCache: [String: NSImage] = [:]
 
     // tag -> id 映射（Finder 不保留 representedObject/toolTip）
     private var tagToId: [Int: String] = [:]
     // tag -> path 映射（避免依赖 appState.cdirs，确保路径始终可查）
     private var tagToPath: [Int: String] = [:]
+    // 稳定 rid -> tag 映射：同一配置项复用 tag，避免每次重建菜单都新增映射
+    private var ridToTag: [String: Int] = [:]
     private var nextTag: Int = 1
 
     override init() {
@@ -64,47 +69,8 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
         FIFinderSyncController.default().directoryURLs = [myFolderURL]
         logger.info("FinderSync launched from \(Bundle.main.bundlePath, privacy: .public)")
 
-        messager.on(name: Key.hostQuit) { [weak self] _ in
-            self?.isHostAppOpen = false
-        }
-        messager.on(name: Key.hostRunning) { [weak self] payload in
-            guard let self else { return }
-
-            // 接收主应用推送的配置数据
-            if let configJSON = payload.configJSON, !configJSON.isEmpty {
-                if let jsonData = configJSON.data(using: .utf8),
-                   let dict = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
-                    SharedSettings.receiveRemote(dict)
-                }
-            }
-
-            self.isHostAppOpen = true
-
-            // 心跳每 3 秒会重复推送同一份 target，值没变就别再赋值：
-            // 反复设置 directoryURLs 会让 Finder 重新评估监控范围
-            if payload.target.count > 0 {
-                let newDirs = Set(payload.target.map { URL(fileURLWithPath: $0) })
-                if FIFinderSyncController.default().directoryURLs != newDirs {
-                    FIFinderSyncController.default().directoryURLs = newDirs
-                }
-            }
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                // 仅当配置版本变化时才刷新菜单；周期心跳会重复推送相同配置，
-                // 若每次都 invalidateMenuStructure 会导致右键菜单频繁重建。
-                let oldVersion = self.currentDataVersion()
-                self.refreshDataVersion()
-                if self.currentDataVersion() != oldVersion {
-                    self.appState.refresh()
-                    DiagnosticLog.shared.write(
-                        "config refreshed version=\(self.currentDataVersion()) apps=\(self.appState.apps.count)"
-                    )
-                    self.invalidateMenuStructure()
-                }
-            }
-        }
-
-        // 扩展启动时主应用可能已经在跑了（它没机会给我们推 "running"），本地实测一次
+        // 配置不再经 DNC 推送：扩展启动时读快照，之后每次建菜单前按
+        // configVersion/mtime 检查快照是否更新（syncFromSnapshotIfNewer）。
         isHostAppOpen = Self.hostAppIsRunning
         // 注意：这里不要碰 appState —— 它是 lazy + MainActor.assumeIsolated，
         // 而扩展的 init 不保证在主线程；只记录快照文件是否存在。
@@ -122,9 +88,6 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
                 DiagnosticLog.shared.write("ipc ping \(ok ? "ok" : "failed")")
             }
         }
-
-        // 向主应用请求配置，重试直到收到响应
-        requestConfigFromApp(retry: 0)
     }
 
     /// 主应用进程当前是否在运行（本地查询，无跨进程开销）
@@ -228,36 +191,18 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
         }
     }
 
-    func heartBeat() {
-        logger.debug("start send message -- heartbeat")
-        messager.sendMessage(name: Key.messageFromFinder, data: MessagePayload(action: "heartbeat", target: [], rid: ""))
-    }
-
-    /// 向主应用请求配置，失败时重试（最多 10 次，每次间隔 2 秒）
-    private func requestConfigFromApp(retry: Int) {
-        guard retry < 10 else {
-            logger.warning("配置请求重试已达上限，放弃")
-            return
-        }
-        heartBeat()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-            guard let self else { return }
-            // 如果尚未收到配置，继续重试
-            if SharedSettings.remotePayload == nil {
-                self.requestConfigFromApp(retry: retry + 1)
-            }
-        }
-    }
-
     // 使所有缓存失效（菜单结构 + 图标 + 选中文件），仅在扩展启动时使用
     func invalidateMenuCache() {
         cachedMenus.removeAll()
         cachedDataVersions.removeAll()
+        menuCacheOrder.removeAll()
         tagToId.removeAll()
         tagToPath.removeAll()
+        ridToTag.removeAll()
         nextTag = 1
         sfSymbolCache.removeAll()
         iconCache.removeAll()
+        resizedIconCache.removeAll()
         cachedSelectedURLs = nil
         cachedTargetURL = nil
     }
@@ -266,6 +211,7 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
     private func invalidateMenuStructure() {
         cachedMenus.removeAll()
         cachedDataVersions.removeAll()
+        menuCacheOrder.removeAll()
         // tagToId/tagToPath 不清除——已显示的菜单项点击后仍需通过标签查找
     }
 
@@ -358,6 +304,7 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
         if let cached = cachedMenus[cacheKey],
            let cachedVersion = cachedDataVersions[cacheKey],
            cachedVersion == dataVersion {
+            touchMenuCache(cacheKey)
             return cached
         }
         let applicationMenu = NSMenu(title: "Iclick")
@@ -375,8 +322,36 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
 
         cachedMenus[cacheKey] = applicationMenu
         cachedDataVersions[cacheKey] = dataVersion
+        touchMenuCache(cacheKey)
+        trimMenuCacheIfNeeded()
 
         return applicationMenu
+    }
+
+    /// 把命中/新插入的菜单移到 LRU 末尾。
+    private func touchMenuCache(_ key: String) {
+        menuCacheOrder.removeAll { $0 == key }
+        menuCacheOrder.append(key)
+    }
+
+    /// 菜单缓存超过上限时淘汰最久未使用的项。
+    private func trimMenuCacheIfNeeded() {
+        while menuCacheOrder.count > maxCachedMenus {
+            let oldest = menuCacheOrder.removeFirst()
+            cachedMenus.removeValue(forKey: oldest)
+            cachedDataVersions.removeValue(forKey: oldest)
+        }
+    }
+
+    /// 同一条配置项复用同一个 tag。标签映射因此只随配置项数量增长，
+    /// 不随“重建菜单次数”增长；已显示的旧菜单也不会因为映射被清掉而失效。
+    private func tag(forRid rid: String) -> Int {
+        if let existing = ridToTag[rid] { return existing }
+        let tag = nextTag
+        nextTag += 1
+        ridToTag[rid] = tag
+        tagToId[tag] = rid
+        return tag
     }
 
     /// 菜单缓存键：菜单内容不仅取决于 menuKind 和配置版本，还取决于当前选中项数量
@@ -387,8 +362,8 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
     }
 
     @MainActor @objc func createMenuForToolbar(_ applicationMenu: NSMenu, menuKind: FIMenuKind) {
-        // tag 映射不做全量清除（不同 menuKind 的菜单会共享映射），
-        // 仅依靠递增 nextTag 保证标签唯一，旧映射被新构建覆盖。
+        // tag 按 rid 稳定复用（见 tag(forRid:)），不清空映射：
+        // 不同 menuKind 的菜单可以共享同一个 tag，旧菜单点击也仍能查到。
 
         // 1. 一次遍历 apps，分流主菜单和子菜单
         let (mainMenuItems, submenuAppsItem) = buildAppMenuItems()
@@ -436,9 +411,7 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
                 menuItem.target = self
                 menuItem.title = String(localized: "Open With \(item.name)")
                 menuItem.action = #selector(appOpen(_:))
-                menuItem.tag = nextTag
-                tagToId[nextTag] = item.id
-                nextTag += 1
+                menuItem.tag = tag(forRid: item.id)
                 menuItem.image = appIcon(for: item)
                 mainMenuItems.append(menuItem)
             } else {
@@ -464,9 +437,7 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
                 menuItem.target = self
                 menuItem.title = item.name
                 menuItem.action = #selector(appOpen(_:))
-                menuItem.tag = nextTag
-                tagToId[nextTag] = item.id
-                nextTag += 1
+                menuItem.tag = tag(forRid: item.id)
                 menuItem.image = appIcon(for: item)
                 submenu.addItem(menuItem)
             }
@@ -489,12 +460,35 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
         return icon
     }
 
+    /// 自定义文件图标：按路径 + 修改时间缓存缩放结果，避免每次重建菜单都读盘/缩放。
+    private func fileMenuIcon(path: String) -> NSImage? {
+        let attrs = try? FileManager.default.attributesOfItem(atPath: path)
+        let mtime = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+        let key = "file16:\(path):\(mtime)"
+        if let cached = resizedIconCache[key] { return cached }
+        guard let image = NSImage(contentsOfFile: path) else { return nil }
+        let sized = menuSizedImage(image) ?? image
+        resizedIconCache[key] = sized
+        return sized
+    }
+
+    /// 系统文件图标：缓存 16pt 缩放结果。isTemplate 参与 key，
+    /// 保留既有「新建文件项会把共享图标改成模板」的行为，不额外改变观感。
+    private func appMenuIcon(path: String) -> NSImage {
+        let raw = getIcon(for: path)
+        let key = "app16:\(path):\(raw.isTemplate)"
+        if let cached = resizedIconCache[key] { return cached }
+        let sized = menuSizedImage(raw) ?? raw
+        resizedIconCache[key] = sized
+        return sized
+    }
+
     /// 获取 APP 图标，与设置左侧菜单逻辑一致，缩放至标准菜单尺寸
     private func appIcon(for item: OpenWithApp) -> NSImage {
         if let iconStr = item.icon, !iconStr.isEmpty {
             if iconStr.contains("/") {
                 // 自定义文件路径图标
-                if let custom = menuSizedImage(NSImage(contentsOfFile: iconStr)) {
+                if let custom = fileMenuIcon(path: iconStr) {
                     return custom
                 }
             } else if let sfImage = sfIcon(iconStr, description: item.name) {
@@ -502,9 +496,8 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
                 return sfImage
             }
         }
-        // 统一回退：系统文件图标 → 缩放至菜单尺寸
-        let fallback = getIcon(for: item.url.path)
-        return menuSizedImage(fallback) ?? fallback
+        // 统一回退：系统文件图标 → 缩放至菜单尺寸（缩放结果已缓存）
+        return appMenuIcon(path: item.url.path)
     }
 
     /// 子菜单显示名称：优先用设置里自定义的名字，未自定义时用内置本地化名称。
@@ -523,7 +516,7 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
             return nil
         }
         if icon.contains("/") {
-            return menuSizedImage(NSImage(contentsOfFile: icon))
+            return fileMenuIcon(path: icon)
         }
         return sfIcon(icon, description: id)
     }
@@ -607,9 +600,7 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
             menuItem.target = self
             menuItem.title = String(localized: String.LocalizationValue(item.name))
             menuItem.action = #selector(actioning(_:))
-            menuItem.tag = nextTag
-            tagToId[nextTag] = item.id
-            nextTag += 1
+            menuItem.tag = tag(forRid: item.id)
             if RCAction.isCustomIcon(item.icon) {
                 // 自定义图片路径图标，缩放至标准菜单尺寸
                 menuItem.image = menuSizedImage(NSImage(contentsOfFile: item.icon))
@@ -659,11 +650,11 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
             menuItem.subtitle = dir.url.path
             // 使用 openCommonDir 选择器，直接通过 NSWorkspace 打开目录，同时发送消息作为备份
             menuItem.action = #selector(openCommonDir(_:))
-            menuItem.tag = nextTag
             // 存储特殊 rid 以标识是常用路径点击
-            tagToId[nextTag] = "common-dir:\(dir.url.path)"
-            tagToPath[nextTag] = dir.url.path
-            nextTag += 1
+            let rid = "common-dir:\(dir.url.path)"
+            let tag = tag(forRid: rid)
+            menuItem.tag = tag
+            tagToPath[tag] = dir.url.path
             // 与父菜单一致的绿色着色
             if let tinted = tintedSymbol(named: "folder.fill", color: .systemGreen, size: 16) {
                 menuItem.image = tinted
@@ -705,9 +696,7 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
             menuItem.target = self
             menuItem.title = "\(item.defaultName)\(item.ext)"
             menuItem.action = #selector(createFile(_:))
-            menuItem.tag = nextTag
-            tagToId[nextTag] = item.id
-            nextTag += 1
+            menuItem.tag = tag(forRid: item.id)
 
             if let app = item.openApp {
                 // 注意：getIcon 返回缓存里的同一个实例，这里改 isTemplate 会永久污染缓存，
@@ -717,8 +706,8 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
                 icon.isTemplate = true
                 menuItem.image = menuSizedImage(icon)
             } else if item.icon.contains("/") {
-                // 自定义文件路径图标，缩放至标准菜单尺寸
-                menuItem.image = menuSizedImage(NSImage(contentsOfFile: item.icon))
+                // 自定义文件路径图标，缩放至标准菜单尺寸（结果已缓存）
+                menuItem.image = fileMenuIcon(path: item.icon)
                     ?? menuSizedImage(item.systemIcon)
             } else if let assetImage = NSImage(named: item.icon) {
                 // Asset Catalog 图片（与设置 systemIcon 逻辑一致）

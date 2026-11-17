@@ -6,44 +6,45 @@
 
 ```
 Finder.app
-  └─ FinderSyncExt.appex（沙盒）  ── DNC 消息 ──▶  Iclick.app（非沙盒，常驻）
-        │                                            │
-        │ 读                                          │ 写
-        ▼                                            ▼
-  App Group 容器                               ~/Library/Application Support/IClick/
-  └─ SharedSettings-snapshot.plist (主应用写)     └─ SharedSettings.plist（唯一真源，主应用写）
+  └─ FinderSyncExt.appex（沙盒）  ── LocalIPC（签名校验） ──▶  Iclick.app（非沙盒，常驻）
+        │                                                          │
+        │ 读快照                                                    │ 写
+        ▼                                                          ▼
+  App Group 容器                                             ~/Library/Application Support/IClick/
+  └─ SharedSettings-snapshot.plist (主应用写)                   └─ SharedSettings.plist（唯一真源，主应用写）
   └─ CustomIcons/（自定义图标）
+  └─ ipc.sock（主应用监听）
 ```
 
 | 进程 | 职责 | 能写什么 |
 | --- | --- | --- |
 | `Iclick.app` | 真正的文件操作、设置界面、配置持久化、登录项 | `SharedSettings.plist`、群组容器快照、自定义图标 |
-| `FinderSyncExt.appex` | 在 Finder 右键菜单里展示菜单项，把点击转成消息 | **什么都不写**（只读消费者） |
+| `FinderSyncExt.appex` | 在 Finder 右键菜单里展示菜单项，把点击转成 IPC 动作 | **什么都不写**（只读消费者） |
 
-**关键不变量：配置只有一个写者。** 扩展是沙盒进程，只通过下面两条路拿配置：
+**关键不变量：配置只有一个写者。** 扩展是沙盒进程，只读 App Group 容器里的
+`SharedSettings-snapshot.plist`（主应用每次落盘时同步写）。快照里带
+`ICLICK_CONFIG_VERSION`；扩展每次建菜单前比较版本，发现更新就重新加载。
+所以主应用没运行、或推送丢失，扩展也能立刻建出正确的菜单，而不是退回默认项。
 
-1. 主应用推送的 `ICLICK_MAIN_Running` 消息（实时更新）；
-2. App Group 容器里的 `SharedSettings-snapshot.plist`（主应用每次落盘时同步写，扩展启动时立刻可读）。
+## 2. 通信
 
-快照的意义：主应用没运行、或推送还没到的时候，扩展也能立刻建出正确的菜单，而不是退回默认项。
+**不再使用 DistributedNotificationCenter。** 它不校验发送方，任何本机进程都能伪造。
 
-## 2. 消息
+- 扩展 → 主应用：App Group 容器内的 Unix domain socket（`ipc.sock`），
+  主应用用 `LOCAL_PEERPID` + `SecCodeCopyGuestWithAttributes` 校验对端代码签名
+  （bundle id + Team ID），再处理 `open` / `actioning` / `Create File` /
+  `common-dirs` / `authorize-dir` / `ping`。
+- 主应用 → 扩展：配置通过快照传递。主应用写配置后递增 `configVersion`；
+  扩展在 `menu(for:)` 里调用 `syncFromSnapshotIfNewer()`，版本更高才重新解析。
+- 存活判断：扩展在发动作前用本机 `runningApplications` 查主应用是否在跑，
+  不在就拉起并重试（最多约 6 秒），不再依赖心跳/退出通知。
 
-`DistributedNotificationCenter`，通知名和负载定义在 `IClick/Shared/Messager.swift`：
+**可靠性**：
 
-- 扩展 → 主应用：`ICLICK_FINDER_Main`，`action` 为 `open` / `actioning` / `Create File` / `common-dirs` / `heartbeat`。
-- 主应用 → 扩展：`ICLICK_MAIN_Running`（携带完整配置 JSON）和 `ICLICK_MAIN_Quit`。
-
-消息是“发出即忘”的。因此：
-
-- 扩展在发动作前会先用本机 `runningApplications` 查主应用是否在跑，不在就拉起并重试（最多约 6 秒）。
-- **动作消息带 `messageID` 并有 ack**：主应用收到后先回 `ICLICK_MAIN_Ack`，扩展没收到就每 0.6 秒重发（最多 12 次）。主应用用 `MessageDeduplicator` 按 ID 去重，所以删除/移动这类非幂等操作不会被重发执行两次。
-- 主应用收到未知 rid 时会从磁盘重读配置再匹配一次（防止内存状态过期）。
+- **动作消息带 `messageID` 并有 ack**：主应用收到后先回 ack，扩展没收到就重发；
+  主应用用 `MessageDeduplicator` 按 ID 去重，删除/移动这类非幂等操作不会重复执行。
 - `MessagePayload` 手写了解码，缺字段只影响该字段，不会整条丢弃。
-
-ack 在动作执行**之前**发出：它确认“收到了”，不确认“执行成功了”。执行失败会另行通知/记日志，不靠重发补救。
-
-**已知限制**：DNC 是全局命名空间，任何本地进程都能伪造消息。当前没有 XPC/代码签名校验。要做严格的本地权限校验，需要改成 XPC（`NSXPCConnection` + audit token），这是一个后续的大改动。
+- ack 在动作执行**之前**发出：确认“收到了”，不确认“执行成功了”。
 
 ## 3. 用户入口（不能再丢）
 

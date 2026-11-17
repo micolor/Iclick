@@ -199,12 +199,26 @@ log "链接主应用"
 ok "主应用链接完成"
 
 log "编译 FinderSync 扩展"
+# 扩展不编译仅在主应用使用的 Shared 文件（更新器/登录项/设置页 SwiftUI 扩展）。
+# 这些文件 import SwiftUI / ServiceManagement / CryptoKit，编进扩展会让
+# FinderSyncExt 启动时就加载这些框架，显著抬高它的内存峰值。
+EXT_EXCLUDED_SHARED=("Updater.swift" "UpdaterView.swift" "LaunchAtLogin.swift" "Extension+.swift")
+EXT_SHARED_FILES=()
+for f in "$REPO_ROOT"/IClick/Shared/*.swift; do
+    base="${f##*/}"
+    skip=0
+    for excluded in "${EXT_EXCLUDED_SHARED[@]}"; do
+        if [ "$base" = "$excluded" ]; then skip=1; break; fi
+    done
+    if [ "$skip" -eq 0 ]; then EXT_SHARED_FILES+=("$f"); fi
+done
+
 "$SWIFTC" -c -o "$OUT/ext.o" \
     -sdk "$SDK" -target "$DEPLOY_TARGET" -swift-version 6 -Onone \
     -whole-module-optimization -application-extension -module-name FinderSyncExt \
     -plugin-path "$PLUGIN_PATH" \
     "$REPO_ROOT"/FinderSyncExt/*.swift "$REPO_ROOT"/IClick/AppState.swift \
-    "$REPO_ROOT"/IClick/Model/*.swift "$REPO_ROOT"/IClick/Shared/*.swift \
+    "$REPO_ROOT"/IClick/Model/*.swift "${EXT_SHARED_FILES[@]}" \
     > "$OUT/ext-compile.log" 2>&1 \
     || { grep 'error:' "$OUT/ext-compile.log" | head -20 >&2; die "扩展编译失败"; }
 ok "扩展编译通过"
@@ -212,9 +226,9 @@ ok "扩展编译通过"
 log "链接 FinderSync 扩展"
 "$SWIFTC" -o "$OUT/FinderSyncExt" -sdk "$SDK" -target "$DEPLOY_TARGET" -application-extension \
     -Xlinker -e -Xlinker _NSExtensionMain "${PLATFORM_VERSION[@]}" \
-    "$OUT/ext.o" -framework AppKit -framework SwiftUI -framework FinderSync \
-    -framework ServiceManagement -framework CryptoKit -framework UniformTypeIdentifiers \
-    -framework CoreServices -framework Combine > "$OUT/ext-link.log" 2>&1 \
+    "$OUT/ext.o" -framework AppKit -framework FinderSync \
+    -framework UniformTypeIdentifiers -framework CoreServices -framework Combine \
+    > "$OUT/ext-link.log" 2>&1 \
     || { tail -20 "$OUT/ext-link.log" >&2; die "扩展链接失败"; }
 ok "扩展链接完成"
 

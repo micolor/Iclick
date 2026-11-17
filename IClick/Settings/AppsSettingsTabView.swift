@@ -14,7 +14,6 @@ struct AppsSettingsTabView: View {
     @State private var draggedItem: OpenWithApp? = nil
     @State private var dropTargetId: String? = nil
 
-    let messager = Messager.shared
 
     var body: some View {
         Form {

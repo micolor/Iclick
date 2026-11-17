@@ -15,16 +15,6 @@ var subsystem: String { bundleIdentifier }
 private let logger = Logger(subsystem: subsystem, category: "user_defaults")
 
 enum Key {
-    static let messageFromFinder = "ICLICK_FINDER_Main"
-
-    // 主应用 → 扩展。
-    // DistributedNotificationCenter 是全局命名空间且不校验发送方，裸名（"running" / "quit"）
-    // 本机任意进程都能伪造：收到伪造的 "running" 会让扩展覆盖配置快照并直接改写
-    // 监控目录，"quit" 则会让它误判主应用不在、反复去拉起。统一带前缀收窄一下。
-    // （原 messageFromMain = "ICLICK_MAIN_FINDER" 是从未被使用的死常量，已删。）
-    static let hostRunning = "ICLICK_MAIN_Running"
-    static let hostQuit = "ICLICK_MAIN_Quit"
-
     static let apps = "ICLICK_APPs"
     static let actions = "ICLICK_ACTIONS"
     static let fileTypes = "ICLICK_FILE_TYPES"
@@ -57,8 +47,9 @@ extension Dictionary {
 }
 
 /// 跨进程共享设置管理器
-/// - 主应用（非沙盒）：直接读写真实文件
-/// - 扩展（沙盒）：通过 DistributedNotificationCenter 接收主应用推送的数据
+/// - 主应用（非沙盒）：直接写真实文件，落盘时同步写一份 App Group 快照
+/// - 扩展（沙盒）：只读群组容器里的快照，调 `receiveRemote` / `adoptSnapshotIfNeeded`
+///   把它载入内存；扩展从不写文件
 final class SharedSettings: @unchecked Sendable {
     /// 当前用户的真实 home。
     /// 沙盒进程里的 `NSHomeDirectory()` 是容器路径，不能用来拼真实的
@@ -92,7 +83,8 @@ final class SharedSettings: @unchecked Sendable {
             .appendingPathComponent("SharedSettings-snapshot.plist")
     }()
 
-    /// 扩展通过通知接收的远程数据（沙盒内无法直接读文件时使用）
+    /// 扩展进程内的配置内存副本。来源是群组容器快照（`receiveRemote` / `adoptSnapshotIfNeeded`），
+    /// 读取路径优先走它，避免每次读 key 都解析 plist。
     nonisolated(unsafe) static var remotePayload: [String: Any]?
     private static let lock = NSLock()
 
@@ -101,6 +93,10 @@ final class SharedSettings: @unchecked Sendable {
     /// 用 mtime 判断是否失效：主应用原子写入后 mtime 会变，下一次读取自然会重新加载。
     nonisolated(unsafe) private static var snapshotCache: [String: Any]?
     nonisolated(unsafe) private static var snapshotStamp: Date?
+    /// 主应用共享 plist 的内存缓存。设置页一屏会读很多次，每次都解析整份 plist 太浪费。
+    /// 同样按 mtime 失效，旧副本或外部工具改写文件后仍能重新加载。
+    nonisolated(unsafe) private static var sharedCache: [String: Any]?
+    nonisolated(unsafe) private static var sharedStamp: Date?
 
     /// 是否为扩展进程（通过 bundle ID 判断）
     static var isExtension: Bool {
@@ -116,14 +112,15 @@ final class SharedSettings: @unchecked Sendable {
 
     /// 已持锁版本的 load()。NSLock 不可重入，凡是已经拿锁的路径都必须走这个。
     private static func loadLocked() -> [String: Any] {
-        // 扩展优先使用远程推送的数据（最新），其次读群组容器里的快照（主应用落盘时同步写）
+        // 扩展优先使用内存里的快照副本（已由 syncFromSnapshotIfNewer 按版本刷新），
+        // 其次直接读群组容器快照（主应用落盘时同步写）
         if isExtension, let remote = remotePayload {
             return remote
         }
         if isExtension, let dict = loadSnapshotLocked() {
             return dict
         }
-        if let dict = NSDictionary(contentsOf: sharedURL) as? [String: Any] {
+        if let dict = loadSharedLocked() {
             return dict
         }
         return [:]
@@ -165,6 +162,23 @@ final class SharedSettings: @unchecked Sendable {
         return dict
     }
 
+    /// 必须已持锁调用。主应用共享 plist 的 mtime 缓存。
+    private static func loadSharedLocked() -> [String: Any]? {
+        let attrs = try? FileManager.default.attributesOfItem(atPath: sharedURL.path)
+        let stamp = attrs?[.modificationDate] as? Date
+        if let cached = sharedCache, let stamp, stamp == sharedStamp {
+            return cached
+        }
+        guard let dict = NSDictionary(contentsOf: sharedURL) as? [String: Any] else {
+            sharedCache = nil
+            sharedStamp = nil
+            return nil
+        }
+        sharedCache = dict
+        sharedStamp = stamp
+        return dict
+    }
+
     /// 保存（仅主应用写入文件）
     static func save(_ dict: [String: Any]) {
         lock.lock()
@@ -178,7 +192,17 @@ final class SharedSettings: @unchecked Sendable {
         // 覆盖主应用的配置（会导致 _migrated_to_shared_suite 标志丢失 → 迁移重跑 → 配置被旧值顶掉）
         if isExtension { return }
 
-        (dict as NSDictionary).write(to: sharedURL, atomically: true)
+        let wroteShared = (dict as NSDictionary).write(to: sharedURL, atomically: true)
+        if wroteShared {
+            // 写入成功后直接更新内存缓存，省掉下一次读取的磁盘解析。
+            sharedCache = dict
+            let attrs = try? FileManager.default.attributesOfItem(atPath: sharedURL.path)
+            sharedStamp = attrs?[.modificationDate] as? Date
+        } else {
+            logger.warning("写入共享配置失败: \(sharedURL.path, privacy: .public)")
+            sharedCache = nil
+            sharedStamp = nil
+        }
 
         // 同步写一份扩展能读的群组容器快照。扩展启动时用它初始化菜单，
         // 不再依赖「主应用已经运行并推送过配置」。
@@ -189,7 +213,7 @@ final class SharedSettings: @unchecked Sendable {
         }
     }
 
-    /// 接收远程配置（扩展使用），将 base64 字符串还原为 Data
+    /// 载入快照配置（扩展使用），将 base64 字符串还原为 Data
     static func receiveRemote(_ dict: [String: Any]) {
         // 将以 "_b64:" 前缀的字符串还原为 Data
         var converted: [String: Any] = [:]
@@ -204,19 +228,6 @@ final class SharedSettings: @unchecked Sendable {
         lock.lock()
         remotePayload = converted
         lock.unlock()
-    }
-
-    /// 导出现有数据为字典（主应用用于发送给扩展），将 Data 值转为 base64 字符串
-    static func exportAllForIPC() -> [String: Any] {
-        var result: [String: Any] = [:]
-        for (key, value) in load() {
-            if let data = value as? Data {
-                result[key] = "_b64:" + data.base64EncodedString()
-            } else {
-                result[key] = value
-            }
-        }
-        return result
     }
 
     /// 导出现有数据为字典
