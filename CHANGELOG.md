@@ -25,6 +25,8 @@
 
 ### Changed
 
+- 多选文件「打开方式」只解析应用并启动一次，用单个 `open` 进程传递全部路径，
+  不再为每个文件做一次 LaunchServices 查询 / Info.plist 读取 / 进程启动。
 - 配置同步彻底改为快照版本号：主应用只递增 `ICLICK_CONFIG_VERSION`（80ms 防抖），
   扩展在下一次建菜单时自行比较版本并重载快照；DistributedNotificationCenter 的
   心跳/配置推送/退出通知全部删除（不校验发送方，且每次启动都会重复请求）。
@@ -43,6 +45,11 @@
 
 ### Fixed
 
+- 「常用 App」打开目标项只发一次 open 事件（`NSWorkspace.open(_:withApplicationAt:)`）。
+  原来是先 `openApplication` 启动应用、0.5 秒后再单独把路径交给它：Terminal 这类
+  「启动就开一个窗口」的应用在自身没有窗口时，第一步的 reopen 先开一个空白窗口，
+  第二步再开一个目标目录窗口——用户看到的就是「点一次，打开两次」。启动/交付失败时
+  仍回退 `/usr/bin/open`。
 - 用户双击/重开应用时打开设置窗口；扩展或登录项拉起时不弹窗。
 - 设置里的「在菜单栏显示」改用 App Group，修复开关不生效。
 - 主应用找不到菜单 rid 时重读磁盘配置再匹配。

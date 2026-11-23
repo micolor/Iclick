@@ -1009,70 +1009,117 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        for dirPath in target {
-            let decodedPath = dirPath.removingPercentEncoding ?? dirPath
-            doOpenApp(rcitem: rcitem, url: URL(fileURLWithPath: decodedPath, isDirectory: true))
-        }
-    }
+        let paths = target.map { $0.removingPercentEncoding ?? $0 }
+        guard !paths.isEmpty else { return }
 
-    /// 执行打开应用操作
-    private func doOpenApp(rcitem: OpenWithApp, url dir: URL) {
+        // 应用解析、Info.plist 读取、启动都只做一次。原来是在 target 循环里逐个做：
+        // 选中 20 个文件 = 20 次 LaunchServices 查询 + 20 次 Info.plist 读取 +
+        // 20 个 /usr/bin/open 进程 + 20 次 0.5 秒延迟。
         let appURL = resolveAppURL(rcitem.url)
         let appName = appURL.deletingPathExtension().lastPathComponent
         let bundleID = readBundleIdentifier(from: appURL)
         let log = logger
-        logger.info("打开目录: \(dir.path), 应用: \(appName), bundleID: \(bundleID ?? "nil")")
-        DiagnosticLog.shared.write("open app=\(appName) dir=\(dir.path)")
+        log.info("打开: \(paths.joined(separator: ", ")), 应用: \(appName), bundleID: \(bundleID ?? "nil")")
+        DiagnosticLog.shared.write("open app=\(appName) targets=\(paths.count)")
 
         let config = NSWorkspace.OpenConfiguration()
         config.promptsUserIfNeeded = false
         config.arguments = rcitem.arguments
         config.environment = rcitem.environment
 
-        // Step 1: 启动应用。NSWorkspace.openApplication 是沙箱兼容的 API
-        NSWorkspace.shared.openApplication(at: appURL, configuration: config) { runningApp, error in
+        // 启动应用和交付目标项必须走同一个 open 事件。
+        //
+        // 原来是两步：先 openApplication 启动应用，0.5 秒后再用 /usr/bin/open -b
+        // 把路径交给它。对 Terminal 这类「启动就开一个窗口」的应用，两步就是两次
+        // 开窗：应用当时没有窗口时，第一步的 reopen 先开一个空白窗口，第二步再开
+        // 目标目录的窗口——用户看到的就是「点一次，打开两次」。
+        //
+        // NSWorkspace.open(_:withApplicationAt:) 在同一个 LaunchServices 事件里
+        // 启动应用并交付全部目标项，冷启动只产生一个窗口；它和 openApplication
+        // 一样是沙箱兼容的 API。
+        let urls = paths.map { URL(fileURLWithPath: $0) }
+        NSWorkspace.shared.open(urls, withApplicationAt: appURL, configuration: config) { runningApp, error in
             if let error = error {
-                log.error("启动应用失败: \(appName), \(error.localizedDescription)")
-                DiagnosticLog.shared.write("open failed app=\(appName) error=\(error.localizedDescription)")
-                // 应用被移动/删除、或签名损坏时会走到这里。原来只有日志，
-                // 用户看到的是「点了没反应」。
-                Self.postUserNotification(
-                    title: "打开失败",
-                    informativeText: "无法启动「\(appName)」：\(error.localizedDescription)"
+                log.warning("NSWorkspace 打开失败，回退 /usr/bin/open: \(error.localizedDescription)")
+                DiagnosticLog.shared.write(
+                    "open fallback app=\(appName) error=\(error.localizedDescription)"
+                )
+                Self.sendTargetsWithOpenCLI(
+                    appURL: appURL,
+                    bundleID: bundleID,
+                    appName: appName,
+                    appArguments: rcitem.arguments,
+                    environment: rcitem.environment,
+                    paths: paths
                 )
                 return
             }
-            log.info("应用已启动: \(runningApp?.localizedName ?? appName)")
-            DiagnosticLog.shared.write("open launched app=\(appName)")
+            log.info("已在 \(runningApp?.localizedName ?? appName) 中打开 \(urls.count) 项")
+            DiagnosticLog.shared.write("open ok app=\(appName) targets=\(urls.count)")
+        }
+    }
 
-            // Step 2: 应用已运行，用 open 发送目录——此时不会触发 Cryptexes 可执行文件访问
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                let process = Process()
-                process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-                if let bid = bundleID {
-                    process.arguments = ["-b", bid, dir.path]
-                } else {
-                    process.arguments = ["-a", appName, dir.path]
-                }
-                process.terminationHandler = { proc in
-                    if proc.terminationStatus == 0 {
-                        log.info("成功在 \(appName) 中打开: \(dir.path)")
-                    } else {
-                        log.error("发送目录失败, exit code: \(proc.terminationStatus)")
-                        DiagnosticLog.shared.write(
-                            "open-dir send failed app=\(appName) dir=\(dir.path) exit=\(proc.terminationStatus)"
-                        )
-                    }
-                }
-                do {
-                    try process.run()
-                } catch {
-                    log.error("启动 /usr/bin/open 失败: \(error.localizedDescription)")
+    /// 回退路径：用 /usr/bin/open 把全部目标项交给应用。
+    ///
+    /// 只在 NSWorkspace.open 报错时走到这里（应用无法启动、或 LaunchServices
+    /// 不接受这个应用 URL）。多选时只起一个进程，而不是每个文件一个。
+    /// 路径仍然交不出去时，退回到旧行为：至少把应用本身启动起来。
+    nonisolated private static func sendTargetsWithOpenCLI(
+        appURL: URL,
+        bundleID: String?,
+        appName: String,
+        appArguments: [String],
+        environment: [String: String],
+        paths: [String]
+    ) {
+        let log = Logger(subsystem: subsystem, category: "AppDelegate")
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        var arguments = bundleID.map { ["-b", $0] } ?? ["-a", appName]
+        arguments.append(contentsOf: paths)
+        process.arguments = arguments
+        process.terminationHandler = { proc in
+            if proc.terminationStatus == 0 {
+                log.info("回退 open 成功: \(appName) \(paths.count) 项")
+                DiagnosticLog.shared.write("open fallback ok app=\(appName) targets=\(paths.count)")
+                return
+            }
+
+            log.error("回退 open 失败, exit code: \(proc.terminationStatus)")
+            DiagnosticLog.shared.write(
+                "open fallback failed app=\(appName) targets=\(paths.count) "
+                + "exit=\(proc.terminationStatus)"
+            )
+
+            // 目标项交不出去（应用不支持这种类型、被移动/删除、签名损坏）时，
+            // 旧行为是「应用照常启动、路径发送失败」。保持这一点：只启动应用。
+            let config = NSWorkspace.OpenConfiguration()
+            config.promptsUserIfNeeded = false
+            config.arguments = appArguments
+            config.environment = environment
+            NSWorkspace.shared.openApplication(at: appURL, configuration: config) { _, error in
+                if let error {
+                    log.error("单独启动应用也失败: \(appName), \(error.localizedDescription)")
                     DiagnosticLog.shared.write(
-                        "open-dir spawn failed app=\(appName) dir=\(dir.path) err=\((error as NSError).code)"
+                        "open launch-only failed app=\(appName) error=\(error.localizedDescription)"
                     )
+                    AppDelegate.postUserNotification(
+                        title: "打开失败",
+                        informativeText: "无法启动「\(appName)」：\(error.localizedDescription)"
+                    )
+                } else {
+                    log.info("目标项未能交付，已单独启动: \(appName)")
+                    DiagnosticLog.shared.write("open launch-only app=\(appName)")
                 }
             }
+        }
+        do {
+            try process.run()
+        } catch {
+            log.error("启动 /usr/bin/open 失败: \(error.localizedDescription)")
+            DiagnosticLog.shared.write(
+                "open fallback spawn failed app=\(appName) err=\((error as NSError).code)"
+            )
         }
     }
 
