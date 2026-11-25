@@ -73,6 +73,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     var appState: AppState = .shared
     private var isProcessingDelete = false
+    /// 粘贴（复制/移动）在后台队列执行：同一时间只允许一个，避免连点把同一个
+    /// 剪切缓冲区移动两次、或两个操作互相看到对方写了一半的文件。
+    private var isProcessingPaste = false
+    /// 自定义剪切列表。`changeCount` 记录写入时的剪贴板序号：粘贴时若序号变了，
+    /// 说明剪切之后又有别的复制操作（Finder Cmd+C、其它 App 拷贝、截图等），
+    /// 以最近一次剪贴板操作为准，不再移动旧文件。
+    private enum CutKey {
+        static let files = Key.actions + ".cut-files"
+        static let changeCount = Key.actions + ".cut-files-change-count"
+    }
     /// 可靠投递去重：扩展在没收到 ack 时会重发同一条动作消息。
     private var processedMessages = MessageDeduplicator()
     /// 扩展 → 主应用的认证 IPC 服务。
@@ -665,7 +675,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         logger.info("---- cutToPasteboard  target:\(target)")
         // 解码路径后存储，确保与授权目录路径格式一致
         let decodedTargets = target.map { $0.removingPercentEncoding ?? $0 }
-        SharedSettings.set(decodedTargets, forKey: Key.actions + ".cut-files")
+        SharedSettings.set(decodedTargets, forKey: CutKey.files)
         // 同时写入选贴板：文件 URL（Finder 可识别） + 路径文本
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
@@ -674,6 +684,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // 也保留路径文本作为后备
         let paths = decodedTargets.joined(separator: "\n")
         pasteboard.setString(paths, forType: .string)
+        // 记下写完之后（而不是之前）的序号，粘贴时用它判断列表是否已过期
+        SharedSettings.set(NSPasteboard.general.changeCount, forKey: CutKey.changeCount)
 
         // 显示通知
         deliverNotification(
@@ -723,16 +735,39 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return []
     }
 
-    /// 粘贴文件：支持 IClick 剪切（移动）和系统复制（拷贝）
+    /// 粘贴文件：支持 IClick 剪切（移动）和系统复制（拷贝）。
+    ///
+    /// 复制/移动循环放到后台队列：多选大文件时原来整段跑在主线程上，
+    /// 期间菜单栏应用完全无响应。剪贴板读取、弹窗、通知仍留在主线程。
     func pasteFromClipboard(_ target: [String], _ trigger: String) {
         logger.info("---- pasteFromClipboard  target:\(target) trigger:\(trigger)")
 
-        // 1. 先检查 IClick 自定义剪切存储（移动操作）
+        guard !isProcessingPaste else {
+            logger.warning("pasteFromClipboard 正在处理中，忽略重复请求")
+            return
+        }
+
+        // 1. 先检查 IClick 自定义剪切存储（移动操作）。
+        //    但只有「剪切之后剪贴板没再变过」才用它：用户剪切后又去 Finder 复制了
+        //    别的东西（或截图、复制文本），最近一次剪贴板操作才是用户意图，继续
+        //    移动旧文件会让人以为粘贴选中了错误的内容。
         var filesToOperate: [String] = []
         var isCutOperation = false
 
-        if let cutFiles = SharedSettings.stringArray(forKey: Key.actions + ".cut-files"),
-           !cutFiles.isEmpty {
+        var cutFiles = SharedSettings.stringArray(forKey: CutKey.files)
+        if let files = cutFiles, !files.isEmpty {
+            let recordedCount = SharedSettings.integer(forKey: CutKey.changeCount)
+            let currentCount = NSPasteboard.general.changeCount
+            // recordedCount == 0：旧版本写下的列表没有序号，保持原行为
+            if recordedCount != 0, recordedCount != currentCount {
+                logger.info("剪切列表已过期，改用系统剪贴板: \(recordedCount) -> \(currentCount)")
+                DiagnosticLog.shared.write("cut stale recorded=\(recordedCount) current=\(currentCount)")
+                SharedSettings.removeObject(forKey: CutKey.files)
+                SharedSettings.removeObject(forKey: CutKey.changeCount)
+                cutFiles = nil
+            }
+        }
+        if let cutFiles, !cutFiles.isEmpty {
             filesToOperate = cutFiles.map { $0.removingPercentEncoding ?? $0 }
             isCutOperation = true
         } else {
@@ -766,14 +801,55 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         // 无沙盒：直接使用文件路径
-        let fm = FileManager.default
         let destBaseURL = URL(fileURLWithPath: rawDest)
-        try? fm.createDirectory(at: destBaseURL, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: destBaseURL, withIntermediateDirectories: true)
 
+        isProcessingPaste = true
+        let files = filesToOperate
+        let isCut = isCutOperation
+        // 外层闭包也用 [weak self]：否则它为了把 self 递进内层闭包会隐式强持有
+        // AppDelegate，与内层的 weak 不一致（Swift 6 会给出 ImplicitStrongCapture 警告）。
+        // 后台工作本身只依赖值类型，用显式类型名调用静态方法。
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let result = AppDelegate.performPaste(files: files, destBaseURL: destBaseURL, isCut: isCut)
+
+            // 清理 IClick 自定义剪切存储（在后台完成，主线程忙时也不会残留）。
+            // 只保留移动失败的项：成功的源文件已经不在原位，留在列表里下次粘贴
+            // 只会再报一次失败；失败项留着则可以直接再粘贴重试。
+            // 剪贴板没有变化，之前记录的 changeCount 仍然有效。
+            if isCut {
+                let failedSet = Set(result.failedPaths)
+                let remaining = files.filter { failedSet.contains($0) }
+                if remaining.isEmpty {
+                    SharedSettings.removeObject(forKey: CutKey.files)
+                    SharedSettings.removeObject(forKey: CutKey.changeCount)
+                } else {
+                    SharedSettings.set(remaining, forKey: CutKey.files)
+                }
+            }
+
+            DispatchQueue.main.async {
+                self?.isProcessingPaste = false
+                self?.deliverPasteNotification(success: result.success, failed: result.failed, isCut: isCut)
+            }
+        }
+    }
+
+    /// 后台执行复制/移动。只依赖传入值，不读写任何 MainActor 状态。
+    nonisolated private static func performPaste(
+        files: [String],
+        destBaseURL: URL,
+        isCut: Bool
+    ) -> (success: Int, failed: Int, failedPaths: [String]) {
+        let fm = FileManager.default
+        // AppDelegate 的 @AppLog 实例属性是 MainActor 隔离的，后台用同 subsystem/
+        // category 的局部 Logger，日志归属不变。
+        let log = Logger(subsystem: subsystem, category: "AppDelegate")
         var successCount = 0
         var failCount = 0
+        var failedPaths: [String] = []
 
-        for filePath in filesToOperate {
+        for filePath in files {
             let sourceURL = URL(fileURLWithPath: filePath)
             let fileName = sourceURL.lastPathComponent
             let destItemURL = destBaseURL.appendingPathComponent(fileName)
@@ -795,40 +871,41 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
 
             do {
-                if isCutOperation {
+                if isCut {
                     try fm.moveItem(at: sourceURL, to: finalURL)
-                    logger.info("移动成功: \(filePath) → \(finalURL.path)")
+                    log.info("移动成功: \(filePath) → \(finalURL.path)")
                 } else {
                     try fm.copyItem(at: sourceURL, to: finalURL)
-                    logger.info("复制成功: \(filePath) → \(finalURL.path)")
+                    log.info("复制成功: \(filePath) → \(finalURL.path)")
                 }
                 successCount += 1
             } catch {
                 failCount += 1
-                logger.error("\(isCutOperation ? "移动" : "复制")失败: \(filePath) -> \(error.localizedDescription)")
+                failedPaths.append(filePath)
+                log.error("\(isCut ? "移动" : "复制")失败: \(filePath) -> \(error.localizedDescription)")
                 DiagnosticLog.shared.write(
-                    "paste failed op=\(isCutOperation ? "move" : "copy") path=\(filePath) "
+                    "paste failed op=\(isCut ? "move" : "copy") path=\(filePath) "
                     + "dest=\(finalURL.path) err=\((error as NSError).code) \(error.localizedDescription)"
                 )
             }
         }
 
-        // 清理 IClick 自定义剪切存储
-        if isCutOperation {
-            SharedSettings.removeObject(forKey: Key.actions + ".cut-files")
-        }
+        return (successCount, failCount, failedPaths)
+    }
 
-        if failCount == 0 {
+    @MainActor
+    private func deliverPasteNotification(success: Int, failed: Int, isCut: Bool) {
+        if failed == 0 {
             deliverNotification(
-                title: isCutOperation ? "粘贴完成" : "复制完成",
-                informativeText: isCutOperation
-                    ? "已移动 \(successCount) 项到目标目录"
-                    : "已复制 \(successCount) 项到目标目录"
+                title: isCut ? "粘贴完成" : "复制完成",
+                informativeText: isCut
+                    ? "已移动 \(success) 项到目标目录"
+                    : "已复制 \(success) 项到目标目录"
             )
         } else {
             deliverNotification(
-                title: isCutOperation ? "粘贴完成（部分失败）" : "复制完成（部分失败）",
-                informativeText: "成功 \(successCount) 项，失败 \(failCount) 项"
+                title: isCut ? "粘贴完成（部分失败）" : "复制完成（部分失败）",
+                informativeText: "成功 \(success) 项，失败 \(failed) 项"
             )
         }
     }
