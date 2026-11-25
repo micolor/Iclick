@@ -321,25 +321,30 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return true
         }
 
-        // 第 2 层：/usr/bin/open
+        // 第 2 层：/usr/bin/open。
+        // 不在主线程 waitUntilExit：它没有超时，LaunchServices 一旦卡住就会把
+        // 整个应用（连同设置窗口）一起钉住。调用方也不依赖这里的返回值。
         logger.debug("NSWorkspace.open 失败，回退 /usr/bin/open: \(path, privacy: .public)")
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/bin/open")
         task.arguments = [path]
+        task.terminationHandler = { proc in
+            if proc.terminationStatus != 0 {
+                DiagnosticLog.shared.write("open-dir failed path=\(path) exit=\(proc.terminationStatus)")
+                Logger(subsystem: subsystem, category: "AppDelegate")
+                    .error("回退 open 失败 \(path, privacy: .public), exit \(proc.terminationStatus)")
+            }
+        }
         do {
             try task.run()
-            task.waitUntilExit()
-            if task.terminationStatus == 0 {
-                return true
-            }
-            DiagnosticLog.shared.write("open-dir failed path=\(path) exit=\(task.terminationStatus)")
+            return true
         } catch {
             logger.error("打开目录失败 \(path, privacy: .public): \(error.localizedDescription, privacy: .public)")
             DiagnosticLog.shared.write(
                 "open-dir failed path=\(path) err=\((error as NSError).code) \(error.localizedDescription)"
             )
+            return false
         }
-        return false
     }
 
     /// 调用 AppleScript 子程序所需的 AppleEvent 常量。
@@ -530,20 +535,26 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// 批量设置 hidden 标志的结果（后台线程 → 主线程传递）。
+    /// 只包含 Sendable 值，避免把 Error / URL 之类的对象跨队列传递。
+    private struct HiddenOutcome: Sendable {
+        var readError: String?
+        var failed: Int = 0
+        var total: Int = 0
+        var firstError: String?
+    }
+
     // 显示目标文件夹下的隐藏的所有文件和文件夹
     func unhideFilesAndDirs(_ target: [String], _ trigger: String) {
         logger.info("开始取消隐藏文件和目录，目标路径: \(target), 触发器: \(trigger)")
         let decodedTarget = target.map { $0.removingPercentEncoding ?? $0 }
 
         if trigger == "ctx-items" {
-            for path in decodedTarget {
-                self.setFileHidden(path: path, hidden: false)
-            }
+            setHiddenFlags(paths: decodedTarget, hidden: false)
         } else {
             guard let dirPath = decodedTarget.first else { return }
-            self.setDirContentsHidden(dirPath: dirPath, hidden: false)
+            setDirContentsHidden(dirPath: dirPath, hidden: false)
         }
-        logger.info("取消隐藏操作完成")
     }
 
     // 隐藏目标文件或文件夹
@@ -552,13 +563,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let decodedTarget = target.map { $0.removingPercentEncoding ?? $0 }
 
         if trigger == "ctx-items" {
-            for path in decodedTarget {
+            // 受保护路径的拦截留在主线程（纯字符串比较，不涉及 I/O）；
+            // 真正逐个写 hidden 标志的部分移到后台。
+            let allowed = decodedTarget.filter { path in
                 if Utils.isProtectedFolder(path) {
                     logger.warning("跳过受保护的文件路径: \(path)")
-                    continue
+                    return false
                 }
-                self.setFileHidden(path: path, hidden: true)
+                return true
             }
+            setHiddenFlags(paths: allowed, hidden: true)
         } else {
             guard let dirPath = decodedTarget.first else { return }
             // 容器菜单（在文件夹空白处右键）走这条分支：会批量改该目录下
@@ -574,85 +588,119 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 logger.warning("跳过系统目录，不对其内容做整体隐藏: \(dirPath)")
                 return
             }
-            self.setDirContentsHidden(dirPath: dirPath, hidden: true)
+            setDirContentsHidden(dirPath: dirPath, hidden: true)
         }
-        logger.info("隐藏操作完成")
     }
 
-    /// 设置目录下所有内容的隐藏状态（不含目录自身）
+    /// 设置目录下所有内容的隐藏状态（不含目录自身）。
+    ///
+    /// 枚举与逐个 setResourceValues 都放到后台队列：一个目录可能有上万个条目，
+    /// 这段原本整段跑在主线程上，大目录会让整个应用（包括设置窗口）卡住。
+    /// 日志与汇总回到主线程写。
     private func setDirContentsHidden(dirPath: String, hidden: Bool) {
-        let action = hidden ? "隐藏" : "取消隐藏"
-        if setDirContentsResourceValuesHidden(dir: URL(fileURLWithPath: dirPath), hidden: hidden) {
-            logger.info("\(action)目录内容操作完成: \(dirPath)")
+        let dir = URL(fileURLWithPath: dirPath)
+        // 外层也 weak：内层闭包要 weak self，外层不声明就会为了传递而隐式强持有
+        // AppDelegate（Swift 6 的 ImplicitStrongCapture 警告）。
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let outcome = AppDelegate.applyHiddenToDirectoryContents(dir: dir, hidden: hidden)
+            DispatchQueue.main.async {
+                self?.reportHiddenOutcome(outcome, scope: dirPath, hidden: hidden)
+            }
         }
     }
 
-    /// 使用 FileManager 设置目录内容的隐藏状态
-    private func setDirContentsResourceValuesHidden(dir: URL, hidden: Bool) -> Bool {
+    /// 批量设置一组路径的 hidden 标志（后台执行，逐项容错）。
+    private func setHiddenFlags(paths: [String], hidden: Bool) {
+        guard !paths.isEmpty else { return }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let log = Logger(subsystem: subsystem, category: "AppDelegate")
+            var outcome = HiddenOutcome(failed: 0, total: paths.count, firstError: nil)
+
+            for path in paths {
+                do {
+                    var fileURL = URL(fileURLWithPath: path)
+                    var values = URLResourceValues()
+                    values.isHidden = hidden
+                    try fileURL.setResourceValues(values)
+                } catch {
+                    outcome.failed += 1
+                    if outcome.firstError == nil {
+                        outcome.firstError = "\((error as NSError).code) \(error.localizedDescription)"
+                    }
+                    // 隐藏标志要改父目录 / 文件本身，TCC、只读卷、权限不足都会走这里。
+                    // 以前只打 .debug（默认不落盘），用户看到的就是「点了没反应」。
+                    log.warning("setResourceValues 失败: \(path), error: \(error.localizedDescription)")
+                    DiagnosticLog.shared.write(
+                        "hidden failed path=\(path) hidden=\(hidden) err=\((error as NSError).code) \(error.localizedDescription)"
+                    )
+                }
+            }
+
+            DispatchQueue.main.async {
+                self?.reportHiddenOutcome(outcome, scope: "\(paths.count) 项", hidden: hidden)
+            }
+        }
+    }
+
+    /// 后台：枚举目录内容并逐个设置 hidden。每个条目单独 try ——
+    /// 只读卷、或没有父目录写权限时，第一项失败不应中止后面的条目。
+    nonisolated private static func applyHiddenToDirectoryContents(
+        dir: URL,
+        hidden: Bool
+    ) -> HiddenOutcome {
         let contents: [URL]
         do {
-            contents = try FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil, options: [.skipsPackageDescendants])
-        } catch {
-            logger.warning("读取目录内容失败: \(dir.path), error: \(error.localizedDescription)")
-            DiagnosticLog.shared.write(
-                "dir-hidden read failed dir=\(dir.path) err=\((error as NSError).code) \(error.localizedDescription)"
+            contents = try FileManager.default.contentsOfDirectory(
+                at: dir,
+                includingPropertiesForKeys: nil,
+                options: [.skipsPackageDescendants]
             )
-            return false
+        } catch {
+            return HiddenOutcome(
+                readError: "\((error as NSError).code) \(error.localizedDescription)",
+                failed: 0,
+                total: 0,
+                firstError: nil
+            )
         }
 
-        // 每个条目单独 try。原先 `try` 在循环内、`catch` 在循环外，第一项失败
-        // （只读卷、或对该目录没有写权限——设置 hidden 标志需要父目录的写权限）
-        // 就会中止整个循环，后面的条目一个都不处理；而且失败只打 .debug
-        // （默认不落盘），用户看到的就是「点了没反应」。现在逐项兜住并汇报失败数。
-        var failed = 0
-        var firstError: Error?
+        var outcome = HiddenOutcome(failed: 0, total: contents.count, firstError: nil)
         for case var fileURL in contents {
             var values = URLResourceValues()
             values.isHidden = hidden
             do {
                 try fileURL.setResourceValues(values)
             } catch {
-                failed += 1
-                if firstError == nil { firstError = error }
+                outcome.failed += 1
+                if outcome.firstError == nil {
+                    outcome.firstError = "\((error as NSError).code) \(error.localizedDescription)"
+                    DiagnosticLog.shared.write(
+                        "dir-hidden item failed dir=\(dir.path) path=\(fileURL.path) "
+                        + "err=\((error as NSError).code) \(error.localizedDescription)"
+                    )
+                }
             }
         }
-        if failed > 0 {
-            logger.warning("目录内容设置失败 \(failed)/\(contents.count) 项: \(dir.path)")
-            let detail = firstError.map {
-                " err=\(($0 as NSError).code) \($0.localizedDescription)"
-            } ?? ""
-            DiagnosticLog.shared.write(
-                "dir-hidden failed dir=\(dir.path) hidden=\(hidden) failed=\(failed)/\(contents.count)\(detail)"
-            )
-            return false
-        }
-        return true
+        return outcome
     }
 
-    /// 设置单个文件/目录的隐藏状态
-    private func setFileHidden(path: String, hidden: Bool) {
+    /// 主线程：把后台批量操作的结果写进日志。
+    @MainActor
+    private func reportHiddenOutcome(_ outcome: HiddenOutcome, scope: String, hidden: Bool) {
         let action = hidden ? "隐藏" : "取消隐藏"
-        if setHiddenFlag(path: path, hidden: hidden) {
-            logger.info("\(action)成功: \(path)")
+        if let readError = outcome.readError {
+            logger.warning("读取目录内容失败: \(scope), \(readError)")
+            DiagnosticLog.shared.write("dir-hidden read failed dir=\(scope) err=\(readError)")
+            return
         }
-    }
-
-    /// 设置文件隐藏标志
-    private func setHiddenFlag(path: String, hidden: Bool) -> Bool {
-        do {
-            var fileURL = URL(fileURLWithPath: path)
-            var values = URLResourceValues()
-            values.isHidden = hidden
-            try fileURL.setResourceValues(values)
-            return true
-        } catch {
-            logger.warning("setResourceValues 失败: \(path), error: \(error.localizedDescription)")
-            // 隐藏标志要改父目录 / 文件本身，TCC、只读卷、权限不足都会走这里。
-            // 以前只打 .debug（默认不落盘），用户看到的就是「点了没反应」。
+        if outcome.failed > 0 {
+            logger.warning("\(action)失败 \(outcome.failed)/\(outcome.total) 项: \(scope)")
             DiagnosticLog.shared.write(
-                "hidden failed path=\(path) hidden=\(hidden) err=\((error as NSError).code) \(error.localizedDescription)"
+                "dir-hidden failed scope=\(scope) hidden=\(hidden) "
+                + "failed=\(outcome.failed)/\(outcome.total) err=\(outcome.firstError ?? "")"
             )
-            return false
+        } else {
+            logger.info("\(action)完成 \(outcome.total) 项: \(scope)")
         }
     }
 
@@ -1259,6 +1307,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        // 把 80ms 防抖里的配置版本号立刻落盘，否则「改完设置马上退出」时
+        // 数据已写入但版本号没递增，扩展会一直认为配置没变。
+        AppState.shared.flushPendingConfigChange()
         ipcServer?.stop()
         logger.info("applicationWillTerminate")
     }

@@ -78,12 +78,17 @@ class AppState: ObservableObject {
     /// 子菜单项的排序顺序（ID 数组）
     @Published var submenuOrder: [String] = [] {
         didSet {
+            // 初始化 / 从快照同步时给这个属性赋值不是用户操作：不能顺手落盘 +
+            // 递增版本号，否则每次启动都白写一遍 plist，还会让扩展多一次无意义的重载。
+            guard !suppressSubmenuOrderPersist else { return }
             SharedSettings.set(submenuOrder, forKey: "submenuOrder")
-            SharedSettings.synchronize()
             // 必须通知扩展：否则右键菜单顺序仍是旧的，直到下次其它配置变更才刷新
             notifyConfigChanged()
         }
     }
+
+    /// 仅为初始化 / 快照同步期间的赋值屏蔽 didSet 的副作用
+    private var suppressSubmenuOrderPersist = false
 
     /// 默认子菜单顺序
     static let defaultSubmenuOrder = ["submenuApps", "newFiles", "commonDirs"]
@@ -109,12 +114,17 @@ class AppState: ObservableObject {
             migrateFromLegacyIfNeeded()
             cleanupStaleKeys()
         }
-        // 加载子菜单排序
+        // 加载子菜单排序（初始化赋值不落盘，见 didSet 里的 suppress 标志）
+        suppressSubmenuOrderPersist = true
         if let saved = SharedSettings.array(forKey: "submenuOrder") as? [String] {
             submenuOrder = saved
         } else {
             submenuOrder = Self.defaultSubmenuOrder
+            // 首次运行仍把默认顺序写一次，保持「键总在」的既有数据形状；
+            // 不触发版本号（扩展读不到时会回退到同一份默认值）。
+            SharedSettings.set(submenuOrder, forKey: "submenuOrder")
         }
+        suppressSubmenuOrderPersist = false
         // 扩展中同步加载，避免首次右键时数据为空
         if inExt {
             load()
@@ -163,9 +173,13 @@ class AppState: ObservableObject {
     }
 
     /// 批量删除（onDelete 可能一次传入多个 index）。
-    /// 注意：必须一次性 remove，逐个删会因为索引位移删错项。
+    ///
+    /// 不用 SwiftUI 的 `remove(atOffsets:)`：那是 SwiftUI 给
+    /// RangeReplaceableCollection 加的扩展，而 AppState 也编译进 FinderSync 扩展 ——
+    /// 只这一处调用就会让扩展把整个 SwiftUI 链接进来。
+    /// 重建数组与它等价（一次 @Published 更新、越界索引忽略），也不会因索引位移删错项。
     @MainActor func deleteApps(at offsets: IndexSet) {
-        apps.remove(atOffsets: offsets)
+        apps = apps.enumerated().compactMap { offsets.contains($0.offset) ? nil : $0.element }
         do {
             try save()
         } catch {
@@ -265,7 +279,10 @@ class AppState: ObservableObject {
         submenuOrder = Self.defaultSubmenuOrder
         showNewFiles = true
         showCommonDirs = true
-        try? save()
+        // 漏掉这个开关时，用户关掉「常用 App」子菜单后点「重置」，
+        // 其余菜单项都恢复了，只有它还是关的。默认值见 showApps getter。
+        showApps = true
+        // 原来这里还有个 try? save() 紧跟着 sync()，一次重置要整份配置写两遍
         sync()
     }
     
@@ -321,23 +338,27 @@ class AppState: ObservableObject {
         let encoder = PropertyListEncoder()
         // 解码失败过的段一律不写：内存里是默认值，写回去等于覆盖磁盘数据。
         // 这是「用户随后任意点一下设置」就永久丢数据的最后一层保护。
+        //
+        // 5 个段合并成一次读-改-写：逐个 set 会做 5 次整份配置读取 + 10 次
+        // 原子写（共享 plist 与快照各一份），改一个开关就有几十次文件 I/O。
+        var values: [String: Any?] = [:]
         if !failedKeys.contains(Key.apps) {
-            SharedSettings.set(try encoder.encode(apps), forKey: Key.apps)
+            values[Key.apps] = try encoder.encode(apps)
         }
         if !failedKeys.contains(Key.actions) {
-            SharedSettings.set(try encoder.encode(actions), forKey: Key.actions)
+            values[Key.actions] = try encoder.encode(actions)
         }
         if !failedKeys.contains(Key.fileTypes) {
-            SharedSettings.set(try encoder.encode(newFiles), forKey: Key.fileTypes)
+            values[Key.fileTypes] = try encoder.encode(newFiles)
         }
         if !failedKeys.contains(Key.permDirs) {
-            SharedSettings.set(try encoder.encode(dirs), forKey: Key.permDirs)
+            values[Key.permDirs] = try encoder.encode(dirs)
         }
         if !failedKeys.contains(Key.commonDirs) {
-            SharedSettings.set(try encoder.encode(cdirs), forKey: Key.commonDirs)
+            values[Key.commonDirs] = try encoder.encode(cdirs)
         }
-        // 立即同步到磁盘，确保扩展进程能立即读取
-        SharedSettings.synchronize()
+        // 一次落盘（内部已同步写共享 plist 与快照），扩展立刻能读到
+        SharedSettings.setMany(values)
         // 仅主应用发送通知，扩展自身不需要通知自己
         if !inExt {
             notifyConfigChanged()
@@ -396,15 +417,28 @@ class AppState: ObservableObject {
         guard !inExt else { return }
 
         pendingVersionBump?.cancel()
-        pendingVersionBump = Task { @MainActor in
+        pendingVersionBump = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 80_000_000)
-            guard !Task.isCancelled else { return }
-            let next = SharedSettings.integer(forKey: Key.configVersion) + 1
-            SharedSettings.set(next, forKey: Key.configVersion)
+            guard !Task.isCancelled, let self else { return }
+            self.pendingVersionBump = nil
+            let next = SharedSettings.incrementInteger(forKey: Key.configVersion)
             DiagnosticLog.shared.write("config version bumped to \(next)")
         }
     }
-    
+
+    /// 退出前把防抖中的版本号立刻落盘。
+    ///
+    /// 数据在 setter/save 里已经写进 plist，版本号却要等 80ms 防抖；用户改完设置
+    /// 立刻退出（或注销）时，这个 Task 会随进程一起消失，扩展就永远认为配置没变，
+    /// 直到下一次修改才恢复。正常退出路径上补一次即可。
+    @MainActor func flushPendingConfigChange() {
+        guard !inExt, pendingVersionBump != nil else { return }
+        pendingVersionBump?.cancel()
+        pendingVersionBump = nil
+        let next = SharedSettings.incrementInteger(forKey: Key.configVersion)
+        DiagnosticLog.shared.write("config version flushed to \(next)")
+    }
+
     @MainActor func sync() {
         _ = try? save()
     }
@@ -415,6 +449,19 @@ class AppState: ObservableObject {
         // 一次读出整份配置，避免每一段都触发一次 plist 解析。
         // 扩展侧未收到主应用推送时，原先 5 段 = 5 次磁盘读取 + 解析。
         let settings = SharedSettings.load()
+
+        // 子菜单顺序也必须跟着快照刷新。原来只在 init 里读一次：用户在设置里
+        // 调整顺序或点「重置」后，扩展进程不重启就永远用旧顺序（版本号变了、
+        // 菜单结构缓存也清了，唯独这个数组还是旧的）。
+        // 只给扩展读：主应用是唯一写者，内存里的值就是最新的；重新赋值反而会
+        // 触发 didSet 把同一个值再写一遍。
+        if inExt,
+           let savedOrder = settings["submenuOrder"] as? [String],
+           savedOrder != submenuOrder {
+            suppressSubmenuOrderPersist = true
+            submenuOrder = savedOrder
+            suppressSubmenuOrderPersist = false
+        }
         // 有任意一段解码失败就置位：本次加载不做「首次落盘」，
         // 避免用内存里的默认值覆盖磁盘上可能只是暂时读不出来的用户数据
         var skipInitialSave = false
@@ -470,10 +517,14 @@ class AppState: ObservableObject {
                 actions = decodedActions
                     // 过滤掉已移除的操作（如旧版的 screenshot-annotate）
                     .filter { action in RCAction.all.contains(where: { $0.id == action.id }) }
-                // 确保预定义操作的属性与默认值一致
+                // 图标迁移：仅在用户未自定义过（仍使用旧默认图标）时更新。
+                //
+                // 注意不要再把 requireSelection 覆盖成默认值：设置页的
+                // 「仅选中文件」是可编辑项，每次加载都覆盖等于编辑永远不生效
+                // （界面里改了、下次启动就退回默认）。默认值自 init 起没有变过，
+                // 因此也不需要为老配置做一次性的纠正迁移。
                 for (idx, action) in actions.enumerated() {
                     if let defaultAction = RCAction.all.first(where: { $0.id == action.id }) {
-                        actions[idx].requireSelection = defaultAction.requireSelection
                         // 同步图标——仅在用户未自定义过（仍使用旧默认图标）时更新
                         if defaultAction.icon == "paperplane.fill" && action.icon == "airplane" {
                             actions[idx].icon = defaultAction.icon

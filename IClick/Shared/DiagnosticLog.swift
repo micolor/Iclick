@@ -21,6 +21,9 @@ final class DiagnosticLog: @unchecked Sendable {
     private let queue = DispatchQueue(label: "cn.anwen.IClick.diagnostics", qos: .utility)
     private let fileURL: URL
     private let maxBytes: UInt64 = 2 * 1024 * 1024
+    /// 只在 queue 上使用。DateFormatter 的创建成本（几十到上百微秒）远高于一次
+    /// 格式化的成本；每写一行都新建一个会让「诊断日志」本身成为可观的开销。
+    private let formatter: DateFormatter
 
     // 崩溃标记：信号处理函数里只能做 async-signal-safe 的事，
     // 所以预先打开 fd、预先准备好一段静态字节，里面不做任何分配。
@@ -41,6 +44,9 @@ final class DiagnosticLog: @unchecked Sendable {
                 .appendingPathComponent("Library/Application Support/IClick")
                 .appendingPathComponent("diagnostics.log")
         }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"
+        self.formatter = formatter
         try? FileManager.default.createDirectory(
             at: fileURL.deletingLastPathComponent(),
             withIntermediateDirectories: true
@@ -52,9 +58,9 @@ final class DiagnosticLog: @unchecked Sendable {
     func write(_ message: String) {
         let url = fileURL
         let cap = maxBytes
+        // 只在串行 queue 上使用，因此不需要额外加锁
+        let formatter = self.formatter
         queue.async {
-            let formatter = DateFormatter()
-            formatter.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"
             let line = "[\(formatter.string(from: Date()))] \(message)\n"
 
             let fm = FileManager.default

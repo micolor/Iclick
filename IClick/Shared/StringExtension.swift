@@ -255,6 +255,44 @@ final class SharedSettings: @unchecked Sendable {
         saveLocked(dict)
     }
 
+    /// 一次读-改-写写入多个键。
+    ///
+    /// `AppState.save()` 要写 5 个配置段。逐个 `set` 就是 5 次「整份 plist 读取 +
+    /// 2 次原子写」= 10 次文件写入；合并成一次后只写 2 次（共享 plist + 群组快照），
+    /// 每次改设置少掉约 8 次磁盘写。语义与连续调用 `set` 完全一致（后面的键覆盖
+    /// 前面的），并且 5 个段落在同一次原子写里 —— 扩展不会看到只更新了一半的配置。
+    static func setMany(_ values: [String: Any?]) {
+        // 扩展只读：与 set 一样直接忽略
+        if isExtension { return }
+        // 全部段都解码失败时 values 为空：不要为了「没东西可写」再重写一遍文件
+        guard !values.isEmpty else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        var dict = loadLocked()
+        for (key, value) in values {
+            if let value {
+                dict[key] = value
+            } else {
+                dict.removeValue(forKey: key)
+            }
+        }
+        saveLocked(dict)
+    }
+
+    /// 单次加锁内完成「读-自增-写」，供 configVersion 这类计数器使用。
+    /// 先 `integer(forKey:)` 再 `set` 会多走一次整份配置读取（含一次文件 stat）。
+    @discardableResult
+    static func incrementInteger(forKey key: String, by delta: Int = 1) -> Int {
+        if isExtension { return 0 }
+        lock.lock()
+        defer { lock.unlock() }
+        var dict = loadLocked()
+        let next = (dict[key] as? Int ?? 0) + delta
+        dict[key] = next
+        saveLocked(dict)
+        return next
+    }
+
     static func data(forKey key: String) -> Data? {
         return object(forKey: key) as? Data
     }
