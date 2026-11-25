@@ -225,8 +225,8 @@ struct NewFileSettingsTabView: View {
                 .aspectRatio(contentMode: .fit)
                 .frame(width: 18, height: 18)
         } else {
-            // SF Symbol
-            let sfName = NewFile.sfSymbolName(for: item.ext)
+            // SF Symbol：用户选过的图标优先，没选过才按扩展名推导
+            let sfName = NewFile.resolvedSymbolName(for: item)
             if let nsImage = tintedSymbol(named: sfName, color: NewFile.nsFileIconColor(for: item.ext), size: 16) {
                 Image(nsImage: nsImage)
                     .resizable()
@@ -530,7 +530,7 @@ struct NewFileEditSheet: View {
                     .aspectRatio(contentMode: .fit)
                     .frame(width: 24, height: 24)
             } else {
-                let sfName = NewFile.sfSymbolName(for: item.ext)
+                let sfName = NewFile.resolvedSymbolName(for: item)
                 if let nsImage = tintedSymbol(named: sfName, color: NewFile.nsFileIconColor(for: item.ext), size: 20) {
                     Image(nsImage: nsImage)
                         .resizable()

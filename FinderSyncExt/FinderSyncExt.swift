@@ -713,8 +713,8 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
                 // Asset Catalog 图片（与设置 systemIcon 逻辑一致）
                 menuItem.image = menuSizedImage(assetImage)
             } else {
-                // SF Symbol，与设置保持一致：按文件扩展名取图标名和颜色着色
-                let sfName = NewFile.sfSymbolName(for: item.ext)
+                // SF Symbol，与设置保持一致：用户选过的图标优先，没选过按扩展名推导
+                let sfName = NewFile.resolvedSymbolName(for: item)
                 let color = NewFile.nsFileIconColor(for: item.ext)
                 if let tinted = tintedSymbol(named: sfName, color: color, size: 16) {
                     menuItem.image = tinted

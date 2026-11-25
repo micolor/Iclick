@@ -330,6 +330,19 @@ extension NewFile {
     static let pptx = NewFile(ext: ".pptx", name: "PPTX", idx: 4, icon: "icon-file-pptx", id: "newfile.pptx", defaultName: "未命名")
     static let xlsx = NewFile(ext: ".xlsx", name: "XLSX", idx: 5, icon: "icon-file-xlsx", id: "newfile.xlsx", defaultName: "未命名")
 
+    /// 实际渲染用的 SF Symbol：优先用户选择的图标（确实是有效 SF Symbol 时），
+    /// 否则回退到按扩展名推导的默认符号。
+    /// 调用方需先处理两种非符号的 icon：自定义图片路径（含 "/"）与 Asset 名称；
+    /// 这里也容忍它们漏进来——路径含 "/" 直接跳过，Asset 名称不是有效符号自然回退。
+    static func resolvedSymbolName(for item: NewFile) -> String {
+        let custom = item.icon.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !custom.isEmpty, !custom.contains("/"),
+           NSImage(systemSymbolName: custom, accessibilityDescription: nil) != nil {
+            return custom
+        }
+        return sfSymbolName(for: item.ext)
+    }
+
     /// 文件扩展名 → SF Symbol 名称
     static func sfSymbolName(for ext: String) -> String {
         switch ext.lowercased() {
