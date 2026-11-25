@@ -266,6 +266,14 @@ cp "$OUT/FinderSyncExt" "$EXT/Contents/MacOS/FinderSyncExt"
 chmod +x "$APP/Contents/MacOS/$APP_NAME" "$EXT/Contents/MacOS/FinderSyncExt"
 ok "已替换两个可执行文件"
 
+# 模板资源以仓库为准：作为模板的已安装 bundle 可能是旧版本（例如缺少
+# docx/pptx 模板），只替换可执行文件会让「新建文件」继续落空到 0 字节。
+for tpl in "$REPO_ROOT"/IClick/Resources/template.*; do
+    [ -f "$tpl" ] || continue
+    cp "$tpl" "$APP/Contents/Resources/$(basename "$tpl")"
+done
+ok "已同步新建文件模板"
+
 # ---------------------------------------------------------------- 签名（先内层后外层）
 
 log "签名"

@@ -45,6 +45,9 @@
 
 ### Fixed
 
+- 「新建文件」的 DOCX/PPTX 不再生成 0 字节文件：`IClick/Resources/` 新增最小合法
+  `template.docx` / `template.pptx` 并加入两个 target，手构建脚本同步复制仓库模板。
+  TXT/MD/JSON 仍为空文件（文本格式本身合法）。
 - 更新器仓库地址：`anwen/IClick` 恒 404，改为 README 里的 `micolor/IClick`
   （「打开发布页」链接与 README 徽章同步修正）。
 - 「下载并安装」不再只认 `.app.zip`：仓库实际只发布 `.dmg`，现在优先用

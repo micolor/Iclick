@@ -38,6 +38,10 @@
 		5C7C2DA12BDD3FE500ED84EF /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = 5C7C2D9F2BDD3FE500ED84EF /* Localizable.xcstrings */; };
 		5C8E8C1B2E254B1500572EDB /* template.xlsx in Resources */ = {isa = PBXBuildFile; fileRef = 5C8E8C1A2E254B1500572EDB /* template.xlsx */; };
 		5C8E8C1C2E254B1500572EDB /* template.xlsx in Resources */ = {isa = PBXBuildFile; fileRef = 5C8E8C1A2E254B1500572EDB /* template.xlsx */; };
+		5CA7D0C12E9B100100AABB03 /* template.docx in Resources */ = {isa = PBXBuildFile; fileRef = 5CA7D0C12E9B100100AABB01 /* template.docx */; };
+		5CA7D0C12E9B100100AABB04 /* template.docx in Resources */ = {isa = PBXBuildFile; fileRef = 5CA7D0C12E9B100100AABB01 /* template.docx */; };
+		5CA7D0C12E9B100100AABB05 /* template.pptx in Resources */ = {isa = PBXBuildFile; fileRef = 5CA7D0C12E9B100100AABB02 /* template.pptx */; };
+		5CA7D0C12E9B100100AABB06 /* template.pptx in Resources */ = {isa = PBXBuildFile; fileRef = 5CA7D0C12E9B100100AABB02 /* template.pptx */; };
 		5C945D022CA50AC000DABD2C /* RCBase.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C945D012CA50AAC00DABD2C /* RCBase.swift */; };
 		5C945D032CA50AC000DABD2C /* RCBase.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C945D012CA50AAC00DABD2C /* RCBase.swift */; };
 		5C945D062CA51B8F00DABD2C /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C945D052CA51B8F00DABD2C /* AppState.swift */; };
@@ -109,6 +113,8 @@
 		5C74BA702D977DCD005673DB /* CommonDirsSettingTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommonDirsSettingTabView.swift; sourceTree = "<group>"; };
 		5C7C2D9F2BDD3FE500ED84EF /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
 		5C8E8C1A2E254B1500572EDB /* template.xlsx */ = {isa = PBXFileReference; lastKnownFileType = file; path = template.xlsx; sourceTree = "<group>"; };
+		5CA7D0C12E9B100100AABB01 /* template.docx */ = {isa = PBXFileReference; lastKnownFileType = file; path = template.docx; sourceTree = "<group>"; };
+		5CA7D0C12E9B100100AABB02 /* template.pptx */ = {isa = PBXFileReference; lastKnownFileType = file; path = template.pptx; sourceTree = "<group>"; };
 		5C945D012CA50AAC00DABD2C /* RCBase.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RCBase.swift; sourceTree = "<group>"; };
 		5C945D052CA51B8F00DABD2C /* AppState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppState.swift; sourceTree = "<group>"; };
 		5CB470D22CEB7A3B009BC725 /* NewFileSettingsTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewFileSettingsTabView.swift; sourceTree = "<group>"; };
@@ -198,6 +204,8 @@
 			isa = PBXGroup;
 			children = (
 				5C8E8C1A2E254B1500572EDB /* template.xlsx */,
+				5CA7D0C12E9B100100AABB01 /* template.docx */,
+				5CA7D0C12E9B100100AABB02 /* template.pptx */,
 			);
 			path = Resources;
 			sourceTree = "<group>";
@@ -340,6 +348,8 @@
 				5C119D102BBE9B9B00B2D7C4 /* Preview Assets.xcassets in Resources */,
 				5C119D0D2BBE9B9B00B2D7C4 /* Assets.xcassets in Resources */,
 				5C8E8C1C2E254B1500572EDB /* template.xlsx in Resources */,
+				5CA7D0C12E9B100100AABB03 /* template.docx in Resources */,
+				5CA7D0C12E9B100100AABB05 /* template.pptx in Resources */,
 				5C7C2DA02BDD3FE500ED84EF /* Localizable.xcstrings in Resources */,
 			);
 		};
@@ -348,6 +358,8 @@
 			files = (
 				5C68BFE62C67707D0011C096 /* Assets.xcassets in Resources */,
 				5C8E8C1B2E254B1500572EDB /* template.xlsx in Resources */,
+				5CA7D0C12E9B100100AABB04 /* template.docx in Resources */,
+				5CA7D0C12E9B100100AABB06 /* template.pptx in Resources */,
 				5C7C2DA12BDD3FE500ED84EF /* Localizable.xcstrings in Resources */,
 			);
 		};
