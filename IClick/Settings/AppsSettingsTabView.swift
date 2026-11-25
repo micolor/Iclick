@@ -110,7 +110,7 @@ struct AppsSettingsTabView: View {
                         .frame(width: 18, height: 18)
                 }
             } else {
-                Image(nsImage: NSWorkspace.shared.icon(forFile: item.url.path))
+                Image(nsImage: Utils.fileIcon(forPath: item.url.path))
                     .resizable()
                     .aspectRatio(contentMode: .fit)
                     .frame(width: 18, height: 18)
@@ -300,7 +300,7 @@ struct AppEditSheet: View {
                                         .frame(width: 24, height: 24)
                                 }
                             } else if let url = appURL {
-                                Image(nsImage: NSWorkspace.shared.icon(forFile: url.path))
+                                Image(nsImage: Utils.fileIcon(forPath: url.path))
                                     .resizable()
                                     .aspectRatio(contentMode: .fit)
                                     .frame(width: 24, height: 24)

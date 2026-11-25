@@ -27,12 +27,15 @@
 		5C50D2922BBFD11100DF31AA /* StringExtension.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C50D2812BBFB33200DF31AA /* StringExtension.swift */; };
 		5C55BF1E2E902CF200943825 /* FinderSyncExt.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 5C119D302BBEA9AC00B2D7C4 /* FinderSyncExt.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		5C5CAB8B2E7FAF22001C5D58 /* Updater.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C5CAB8A2E7FAF1D001C5D58 /* Updater.swift */; };
-		5C5CAB8C2E7FAF22001C5D58 /* Updater.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C5CAB8A2E7FAF1D001C5D58 /* Updater.swift */; };
 		5C5CAB8E2E7FE631001C5D58 /* UpdaterView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C5CAB8D2E7FE5BB001C5D58 /* UpdaterView.swift */; };
-		5C5CAB8F2E7FE631001C5D58 /* UpdaterView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C5CAB8D2E7FE5BB001C5D58 /* UpdaterView.swift */; };
 		5C68BFE12C6651B80011C096 /* Extension+.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C68BFE02C6651B80011C096 /* Extension+.swift */; };
-		5C68BFE22C6651B80011C096 /* Extension+.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C68BFE02C6651B80011C096 /* Extension+.swift */; };
 		5C68BFE62C67707D0011C096 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 5C119D0C2BBE9B9B00B2D7C4 /* Assets.xcassets */; };
+		A10C00042E9C000100000004 /* LocalIPC.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10C00012E9C000100000001 /* LocalIPC.swift */; };
+		A10C00052E9C000100000005 /* DiagnosticLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10C00022E9C000100000002 /* DiagnosticLog.swift */; };
+		A10C00062E9C000100000006 /* MessageDeduplicator.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10C00032E9C000100000003 /* MessageDeduplicator.swift */; };
+		A10C00072E9C000100000007 /* LocalIPC.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10C00012E9C000100000001 /* LocalIPC.swift */; };
+		A10C00082E9C000100000008 /* DiagnosticLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10C00022E9C000100000002 /* DiagnosticLog.swift */; };
+		A10C00092E9C000100000009 /* MessageDeduplicator.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10C00032E9C000100000003 /* MessageDeduplicator.swift */; };
 		5C74BA712D977DCD005673DB /* CommonDirsSettingTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C74BA702D977DCD005673DB /* CommonDirsSettingTabView.swift */; };
 		5C7C2DA02BDD3FE500ED84EF /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = 5C7C2D9F2BDD3FE500ED84EF /* Localizable.xcstrings */; };
 		5C7C2DA12BDD3FE500ED84EF /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = 5C7C2D9F2BDD3FE500ED84EF /* Localizable.xcstrings */; };
@@ -125,6 +128,9 @@
 		5CDFE3152CA3D63B00AE6C95 /* SettingsWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsWindow.swift; sourceTree = "<group>"; };
 		5CDFE3172CA3D66000AE6C95 /* Constants.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Constants.swift; sourceTree = "<group>"; };
 		5CFA85732D1477AD0063A6A1 /* LaunchAtLogin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LaunchAtLogin.swift; sourceTree = "<group>"; };
+		A10C00012E9C000100000001 /* LocalIPC.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalIPC.swift; sourceTree = "<group>"; };
+		A10C00022E9C000100000002 /* DiagnosticLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticLog.swift; sourceTree = "<group>"; };
+		A10C00032E9C000100000003 /* MessageDeduplicator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageDeduplicator.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -220,6 +226,9 @@
 				5C50D2812BBFB33200DF31AA /* StringExtension.swift */,
 				5CC9F0992BC5445C00AF9B81 /* Messager.swift */,
 				5C4288652BDA5536000C0828 /* AppLogger.swift */,
+				A10C00012E9C000100000001 /* LocalIPC.swift */,
+				A10C00022E9C000100000002 /* DiagnosticLog.swift */,
+				A10C00032E9C000100000003 /* MessageDeduplicator.swift */,
 				5C68BFE02C6651B80011C096 /* Extension+.swift */,
 				5CFA85732D1477AD0063A6A1 /* LaunchAtLogin.swift */,
 			);
@@ -388,6 +397,9 @@
 				5CB470D52CEB7A75009BC725 /* AppsSettingsTabView.swift in Sources */,
 				5C158AA92BC64654006EC625 /* GeneralSettingsTabView.swift in Sources */,
 				5C68BFE12C6651B80011C096 /* Extension+.swift in Sources */,
+				A10C00042E9C000100000004 /* LocalIPC.swift in Sources */,
+				A10C00052E9C000100000005 /* DiagnosticLog.swift in Sources */,
+				A10C00062E9C000100000006 /* MessageDeduplicator.swift in Sources */,
 				5C119D072BBE9B9900B2D7C4 /* IClickApp.swift in Sources */,
 				5C4039F52E8F717A00AE4091 /* ModelContainer.swift in Sources */,
 				5C34BAA52D943AF100CF8128 /* Utils.swift in Sources */,
@@ -406,10 +418,10 @@
 				5C34BAA62D943AF100CF8128 /* Utils.swift in Sources */,
 				5CC9F09B2BC5464400AF9B81 /* Messager.swift in Sources */,
 				5C4039F42E8F717A00AE4091 /* ModelContainer.swift in Sources */,
-				5C68BFE22C6651B80011C096 /* Extension+.swift in Sources */,
 				5C945D072CA51B8F00DABD2C /* AppState.swift in Sources */,
-				5C5CAB8F2E7FE631001C5D58 /* UpdaterView.swift in Sources */,
-				5C5CAB8C2E7FAF22001C5D58 /* Updater.swift in Sources */,
+				A10C00072E9C000100000007 /* LocalIPC.swift in Sources */,
+				A10C00082E9C000100000008 /* DiagnosticLog.swift in Sources */,
+				A10C00092E9C000100000009 /* MessageDeduplicator.swift in Sources */,
 			);
 		};
 /* End PBXSourcesBuildPhase section */

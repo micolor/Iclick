@@ -9,6 +9,23 @@ import SwiftUI
 import UniformTypeIdentifiers
 import AppKit
 
+// 与 ActionSettingsTabView 里的说明相同：这个 `Color` 辅助函数只给设置界面用，
+// 放在 RCBase 会让同样编译进 FinderSync 扩展的模型层被迫 import SwiftUI。
+extension NewFile {
+    /// 文件扩展名 → 图标颜色
+    static func fileIconColor(for ext: String) -> Color {
+        switch ext.lowercased() {
+        case ".json": return .orange
+        case ".txt":  return .secondary
+        case ".md":   return .blue
+        case ".docx": return .blue
+        case ".pptx": return .red
+        case ".xlsx": return .green
+        default:      return .accentColor
+        }
+    }
+}
+
 struct NewFileSettingsTabView: View {
     @EnvironmentObject var appState: AppState
 
@@ -241,18 +258,11 @@ struct NewFileSettingsTabView: View {
         }
     }
 
-    /// 与 FinderSync 扩展保持一致的分层着色方法，复杂多层图标可回退到单色渲染
+    /// 与 FinderSync 扩展保持一致的分层着色方法。渲染与缓存统一在
+    /// Utils.tintedSymbol（扩展与设置页共用同一份缓存），重复绘制同一图标
+    /// 不再重新光栅化；字重沿用设置页原有的 .medium。
     private func tintedSymbol(named name: String, color: NSColor, size: CGFloat, hierarchical: Bool = true) -> NSImage? {
-        guard let sym = NSImage(systemSymbolName: name, accessibilityDescription: nil) else { return nil }
-        var config = NSImage.SymbolConfiguration(pointSize: size, weight: .medium)
-        if hierarchical {
-            config = config.applying(NSImage.SymbolConfiguration(hierarchicalColor: color))
-        } else {
-            config = config.applying(NSImage.SymbolConfiguration(paletteColors: [color]))
-        }
-        let tinted = sym.withSymbolConfiguration(config)
-        tinted?.isTemplate = false
-        return tinted
+        Utils.tintedSymbol(named: name, color: color, size: size, weight: .medium, hierarchical: hierarchical)
     }
 }
 
@@ -551,17 +561,10 @@ struct NewFileEditSheet: View {
         }
     }
 
-    /// 与 FinderSync 扩展保持一致的分层着色方法，复杂多层图标可回退到单色渲染
+    /// 与 FinderSync 扩展保持一致的分层着色方法。渲染与缓存统一在
+    /// Utils.tintedSymbol（扩展与设置页共用同一份缓存），重复绘制同一图标
+    /// 不再重新光栅化；字重沿用设置页原有的 .medium。
     private func tintedSymbol(named name: String, color: NSColor, size: CGFloat, hierarchical: Bool = true) -> NSImage? {
-        guard let sym = NSImage(systemSymbolName: name, accessibilityDescription: nil) else { return nil }
-        var config = NSImage.SymbolConfiguration(pointSize: size, weight: .medium)
-        if hierarchical {
-            config = config.applying(NSImage.SymbolConfiguration(hierarchicalColor: color))
-        } else {
-            config = config.applying(NSImage.SymbolConfiguration(paletteColors: [color]))
-        }
-        let tinted = sym.withSymbolConfiguration(config)
-        tinted?.isTemplate = false
-        return tinted
+        Utils.tintedSymbol(named: name, color: color, size: size, weight: .medium, hierarchical: hierarchical)
     }
 }

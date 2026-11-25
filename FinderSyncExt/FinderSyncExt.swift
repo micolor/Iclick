@@ -92,7 +92,10 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
 
     /// 主应用进程当前是否在运行（本地查询，无跨进程开销）
     private static var hostAppIsRunning: Bool {
-        NSWorkspace.shared.runningApplications.contains { $0.bundleIdentifier == hostBundleID }
+        // 原实现枚举 NSWorkspace.shared.runningApplications（全机所有 App）再按
+        // bundle id 过滤；每次点击、每次重试都要走一遍。按 bundle id 直接查
+        // 只返回目标应用本身，进程数越多省得越多。
+        !NSRunningApplication.runningApplications(withBundleIdentifier: hostBundleID).isEmpty
     }
 
     /// 主应用是否已就绪，可以安全投递消息。
@@ -106,9 +109,16 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
     /// 一小时 1200 轮，只为了回答「主应用还在不在」这个本地就能回答的问题。
     /// 本地查询只在真正要发消息时（右键点击）执行一次，不需要轮询。
     private var isHostReady: Bool {
-        if isHostAppOpen && !Self.hostAppIsRunning {
-            isHostAppOpen = false
-            logger.warning("主应用进程已消失（未收到 quit），重置存活标志")
+        // 双向校正。旧实现只处理 true → false：扩展启动时主应用恰好没在运行的话，
+        // 标志会永久停在 false —— launchHostApp 把它拉起来之后也没有人再置回 true，
+        // 于是之后每次点击都在最多 6 秒的重试后静默失败，直到 Finder 重启扩展进程。
+        // 反过来，主应用退出后重新启动也要能重新接上。
+        let running = Self.hostAppIsRunning
+        if isHostAppOpen != running {
+            if !running {
+                logger.warning("主应用进程已消失（未收到 quit），重置存活标志")
+            }
+            isHostAppOpen = running
         }
         return isHostAppOpen
     }
@@ -123,11 +133,32 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
         if payload.messageID.isEmpty {
             payload.messageID = UUID().uuidString
         }
-        deliverViaIPC(payload, attempt: 0)
+        // 预算在发起时定一次：主应用没在跑 = 冷启动，给足约 6 秒；
+        // 已在跑 = socket 只是暂时没就绪，几次重试就够。
+        deliverViaIPC(payload, attempt: 0, maxAttempts: Self.hostAppIsRunning ? 3 : 20)
     }
 
-    private func deliverViaIPC(_ payload: MessagePayload, attempt: Int) {
-        if isHostReady, LocalIPCClient.send(payload) {
+    private func deliverViaIPC(_ payload: MessagePayload, attempt: Int, maxAttempts: Int) {
+        // 存活判断（可能触发本地进程查询）留在主线程；真正的 socket 往返必须离开主线程。
+        // LocalIPCClient.send 是阻塞式的：connect + 写 + 等 ack（超时 1 秒）。
+        // 这个函数由 Finder 的菜单动作回调直接调用，卡住主线程 = 右键之后整个
+        // Finder 转圈，尤其是在主应用正被冷启动、前面几次必然超时的时候。
+        guard isHostReady else {
+            finishIPCAttempt(payload, attempt: attempt, sent: false, maxAttempts: maxAttempts)
+            return
+        }
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let sent = LocalIPCClient.send(payload)
+            DispatchQueue.main.async {
+                self?.finishIPCAttempt(payload, attempt: attempt, sent: sent, maxAttempts: maxAttempts)
+            }
+        }
+    }
+
+    /// 回到主线程后的收尾：记录结果、拉起主应用、安排下一次重试。
+    private func finishIPCAttempt(_ payload: MessagePayload, attempt: Int, sent: Bool, maxAttempts: Int) {
+        if sent {
             DiagnosticLog.shared.write("ipc sent id=\(payload.messageID) action=\(payload.action)")
             return
         }
@@ -137,15 +168,13 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
             launchHostApp()
         }
 
-        // 主应用已在跑但 socket 没就绪时，给几次重试；没在跑时最多等约 6 秒。
-        let maxAttempts = isHostReady ? 3 : 20
         guard attempt < maxAttempts else {
             logger.error("本机 IPC 发送失败: \(payload.action)")
             DiagnosticLog.shared.write("ipc failed id=\(payload.messageID) action=\(payload.action)")
             return
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-            self?.deliverViaIPC(payload, attempt: attempt + 1)
+            self?.deliverViaIPC(payload, attempt: attempt + 1, maxAttempts: maxAttempts)
         }
     }
 
@@ -249,9 +278,13 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
         // If they see it in more than one view at a time, we're only told once.
         // 这里原本用 info/notice：notice 级别会落盘，而这个回调每次都遍历全部监控目录，
         // 目录多的时候等于持续写磁盘。降为 debug（debug 不落盘、默认不采集）。
-        logger.debug("beginObservingDirectoryAtURL: \(url.path, privacy: .public)")
-        for dir in FIFinderSyncController.default().directoryURLs ?? [] {
-            logger.debug("Sync directory set to \(dir.path, privacy: .public)")
+        // OSLog 的插值参数是立即求值的：debug 没开启时也要付出 url.path 的计算
+        // 与消息构造成本。热点回调先问一句再决定要不要构建日志。
+        if logger.isEnabled(type: .debug) {
+            logger.debug("beginObservingDirectoryAtURL: \(url.path, privacy: .public)")
+            for dir in FIFinderSyncController.default().directoryURLs ?? [] {
+                logger.debug("Sync directory set to \(dir.path, privacy: .public)")
+            }
         }
     }
 
@@ -261,8 +294,12 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
     }
 
     override func requestBadgeIdentifier(for url: URL) {
-        // 此回调在 Finder 为每个文件请求角标时都会调用，属于热点，保持 debug
-        logger.debug("requestBadgeIdentifierForURL: \(url.path, privacy: .public)")
+        // 此回调在 Finder 为每个文件请求角标时都会调用，属于热点，保持 debug。
+        // OSLog 插值参数立即求值，debug 未开启时也要算 url.path；先判断级别，
+        // 大目录下能省掉成千上万次无用的路径构造。
+        if logger.isEnabled(type: .debug) {
+            logger.debug("requestBadgeIdentifierForURL: \(url.path, privacy: .public)")
+        }
     }
 
     // MARK: - Menu and toolbar item support
@@ -547,31 +584,19 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
         return resized
     }
 
-    /// 创建着色 SF Symbol 图标，使用分级渲染（hierarchical）保留符号层次细节，统一渲染至 16×16 画布保证菜单中视觉一致
+    /// 创建着色 SF Symbol 图标，使用分级渲染（hierarchical）保留符号层次细节，
+    /// 统一渲染至 16×16 画布保证菜单中视觉一致。
+    /// 渲染与缓存已抽到 Utils.tintedSymbol（设置页共用同一份缓存），
+    /// 这里只固定扩展侧的字重与菜单尺寸。
     private func tintedSymbol(named name: String, color: NSColor, size: CGFloat, hierarchical: Bool = true) -> NSImage? {
-        // 缓存键：symbol名 + 颜色分量hex + 尺寸 + 是否分层（hex 保证跨色彩空间稳定）
-        let colorHex = color.usingColorSpace(.sRGB).flatMap { c in
-            String(format: "#%02X%02X%02X",
-                   Int(round(c.redComponent * 255)),
-                   Int(round(c.greenComponent * 255)),
-                   Int(round(c.blueComponent * 255)))
-        } ?? "?"
-        let key = "tint:\(name):\(colorHex):\(Int(size)):\(hierarchical)"
-        if let cached = sfSymbolCache[key] { return cached }
-
-        guard let sym = NSImage(systemSymbolName: name, accessibilityDescription: nil) else { return nil }
-        var config = NSImage.SymbolConfiguration(pointSize: size, weight: .regular)
-        if hierarchical {
-            config = config.applying(NSImage.SymbolConfiguration(hierarchicalColor: color))
-        } else {
-            config = config.applying(NSImage.SymbolConfiguration(paletteColors: [color]))
-        }
-        guard let tinted = sym.withSymbolConfiguration(config) else { return nil }
-        tinted.isTemplate = false
-        // 统一菜单图标尺寸为 16×16，菜单中视觉大小一致
-        tinted.size = NSSize(width: 16, height: 16)
-        sfSymbolCache[key] = tinted
-        return tinted
+        Utils.tintedSymbol(
+            named: name,
+            color: color,
+            size: size,
+            weight: .regular,
+            hierarchical: hierarchical,
+            normalizeToMenuSize: true
+        )
     }
 
     @MainActor @objc func createActionMenuItems(for menuKind: FIMenuKind) -> [NSMenuItem] {

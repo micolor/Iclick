@@ -8,6 +8,30 @@
 import AppKit
 import SwiftUI
 
+// MARK: - 设置页专用的图标颜色
+//
+// 原来放在 RCBase.swift 里，而 RCBase 也编译进 FinderSync 扩展：那一行
+// `import SwiftUI` 会让扩展在启动时把整个 SwiftUI 框架拉进内存。
+// 这些 `Color` 只被设置界面使用，因此挪到只属于主应用目标的文件里。
+
+extension RCAction {
+    /// 操作图标对应的颜色
+    static func iconColor(for icon: String) -> Color {
+        switch icon {
+        case "document.on.document": return .blue
+        case "trash.fill": return .red
+        case "moon.fill": return .secondary
+        case "sun.max.fill": return .orange
+        case "eye.slash", "eye.slash.fill": return .secondary
+        case "eye", "eye.fill": return .secondary
+        case "airplane", "airdrop", "wifi.radar", "bonjour", "paperplane.fill": return .teal
+        case "camera.viewfinder": return .orange
+        case "pencil.tip.cropview": return .orange
+        default: return .accentColor
+        }
+    }
+}
+
 /// 右键菜单统一列表项
 enum MenuItemWrapper: Identifiable {
     case app(OpenWithApp)
@@ -291,7 +315,7 @@ struct ActionSettingsTabView: View {
                             .frame(width: 18, height: 18)
                     }
                 } else {
-                    Image(nsImage: NSWorkspace.shared.icon(forFile: app.url.path))
+                    Image(nsImage: Utils.fileIcon(forPath: app.url.path))
                         .resizable()
                         .aspectRatio(contentMode: .fit)
                         .frame(width: 18, height: 18)
@@ -532,18 +556,11 @@ struct ActionSettingsTabView: View {
         }
     }
 
-    /// 与 FinderSync 扩展保持一致的分层着色方法，复杂多层图标可回退到单色渲染
+    /// 与 FinderSync 扩展保持一致的分层着色方法。渲染与缓存统一在
+    /// Utils.tintedSymbol（扩展与设置页共用同一份缓存），重复绘制同一图标
+    /// 不再重新光栅化；字重沿用设置页原有的 .medium。
     private func tintedSymbol(named name: String, color: NSColor, size: CGFloat, hierarchical: Bool = true) -> NSImage? {
-        guard let sym = NSImage(systemSymbolName: name, accessibilityDescription: nil) else { return nil }
-        var config = NSImage.SymbolConfiguration(pointSize: size, weight: .medium)
-        if hierarchical {
-            config = config.applying(NSImage.SymbolConfiguration(hierarchicalColor: color))
-        } else {
-            config = config.applying(NSImage.SymbolConfiguration(paletteColors: [color]))
-        }
-        let tinted = sym.withSymbolConfiguration(config)
-        tinted?.isTemplate = false
-        return tinted
+        Utils.tintedSymbol(named: name, color: color, size: size, weight: .medium, hierarchical: hierarchical)
     }
 }
 
@@ -712,18 +729,11 @@ struct AddMenuItemRow: View {
         .contentShape(Rectangle())
     }
 
-    /// 与 FinderSync 扩展保持一致的分层着色方法，复杂多层图标可回退到单色渲染
+    /// 与 FinderSync 扩展保持一致的分层着色方法。渲染与缓存统一在
+    /// Utils.tintedSymbol（扩展与设置页共用同一份缓存），重复绘制同一图标
+    /// 不再重新光栅化；字重沿用设置页原有的 .medium。
     private func tintedSymbol(named name: String, color: NSColor, size: CGFloat, hierarchical: Bool = true) -> NSImage? {
-        guard let sym = NSImage(systemSymbolName: name, accessibilityDescription: nil) else { return nil }
-        var config = NSImage.SymbolConfiguration(pointSize: size, weight: .medium)
-        if hierarchical {
-            config = config.applying(NSImage.SymbolConfiguration(hierarchicalColor: color))
-        } else {
-            config = config.applying(NSImage.SymbolConfiguration(paletteColors: [color]))
-        }
-        let tinted = sym.withSymbolConfiguration(config)
-        tinted?.isTemplate = false
-        return tinted
+        Utils.tintedSymbol(named: name, color: color, size: size, weight: .medium, hierarchical: hierarchical)
     }
 }
 
@@ -878,18 +888,11 @@ struct ActionEditSheet: View {
         }
     }
 
-    /// 与 FinderSync 扩展保持一致的分层着色方法，复杂多层图标可回退到单色渲染
+    /// 与 FinderSync 扩展保持一致的分层着色方法。渲染与缓存统一在
+    /// Utils.tintedSymbol（扩展与设置页共用同一份缓存），重复绘制同一图标
+    /// 不再重新光栅化；字重沿用设置页原有的 .medium。
     private func tintedSymbol(named name: String, color: NSColor, size: CGFloat, hierarchical: Bool = true) -> NSImage? {
-        guard let sym = NSImage(systemSymbolName: name, accessibilityDescription: nil) else { return nil }
-        var config = NSImage.SymbolConfiguration(pointSize: size, weight: .medium)
-        if hierarchical {
-            config = config.applying(NSImage.SymbolConfiguration(hierarchicalColor: color))
-        } else {
-            config = config.applying(NSImage.SymbolConfiguration(paletteColors: [color]))
-        }
-        let tinted = sym.withSymbolConfiguration(config)
-        tinted?.isTemplate = false
-        return tinted
+        Utils.tintedSymbol(named: name, color: color, size: size, weight: .medium, hierarchical: hierarchical)
     }
 }
 
@@ -925,8 +928,8 @@ struct IconPickerSheet: View {
     @State private var searchText = ""
     @State private var selectedCategory = "全部"
 
-    /// 图标分类
-    private let categories: [(name: String, items: [String])] = [
+    /// 图标分类（static：分类表不随视图重建变化，下面的预计算也依赖它）
+    private static let categories: [(name: String, items: [String])] = [
         ("全部", []),
         ("文件", [
             "doc", "doc.fill", "doc.text", "doc.plaintext", "doc.richtext",
@@ -1006,15 +1009,30 @@ struct IconPickerSheet: View {
         ]),
     ]
 
-    /// 当前分类下的图标
-    private var currentIcons: [String] {
-        let icons: [String]
-        if selectedCategory == "全部" {
-            icons = categories.dropFirst().flatMap { $0.items }
-        } else {
-            icons = categories.first(where: { $0.name == selectedCategory })?.items ?? []
+    /// 每个分类「去重 + 排序」后的图标列表，进程内只算一次。
+    ///
+    /// 原实现把 `Array(Set(currentIcons)).sorted()` 写在 body 的 ForEach 里：
+    /// 搜索框每敲一个字符、视图每刷新一次，都要对约 300 个字符串重新建 Set + 排序。
+    private static let sortedIcons: [String: [String]] = {
+        var result: [String: [String]] = [:]
+        for category in categories where category.name != "全部" {
+            result[category.name] = Array(Set(category.items)).sorted()
         }
+        // 「全部」：按分类顺序合并并跨分类去重，再排序（与原来的输出一致）
+        var all: [String] = []
+        var seen = Set<String>()
+        for category in categories.dropFirst() {
+            for icon in category.items where seen.insert(icon).inserted {
+                all.append(icon)
+            }
+        }
+        result["全部"] = all.sorted()
+        return result
+    }()
 
+    /// 当前分类下的图标（已预排序去重，这里只做搜索过滤）
+    private var currentIcons: [String] {
+        let icons = Self.sortedIcons[selectedCategory] ?? []
         if searchText.isEmpty {
             return icons
         }
@@ -1050,7 +1068,7 @@ struct IconPickerSheet: View {
             HStack(spacing: 0) {
                 // 左侧分类列表
                 VStack(spacing: 2) {
-                    ForEach(categories, id: \.name) { category in
+                    ForEach(Self.categories, id: \.name) { category in
                         Button {
                             selectedCategory = category.name
                         } label: {
@@ -1123,7 +1141,7 @@ struct IconPickerSheet: View {
                     } else {
                         ScrollView(.vertical, showsIndicators: true) {
                             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 4), count: 4), spacing: 4) {
-                                ForEach(Array(Set(currentIcons)).sorted(), id: \.self) { icon in
+                                ForEach(currentIcons, id: \.self) { icon in
                                     IconGridItem(
                                         icon: icon,
                                         isSelected: selectedIcon == icon

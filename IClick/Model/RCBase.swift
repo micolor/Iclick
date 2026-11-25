@@ -7,8 +7,12 @@
 import AppKit
 import Foundation
 import OSLog
-import SwiftUI
 import UniformTypeIdentifiers
+
+// 注意：这个文件同时编译进 FinderSync 扩展。扩展不需要任何 SwiftUI 类型
+// （`Color` 辅助函数已移到只属于主应用目标的设置页文件里），
+// 因此这里刻意 **不要** `import SwiftUI` —— 那会让扩展在启动时把整个
+// SwiftUI 框架拉进内存。
 
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "IClick", category: "folder_item")
 
@@ -234,22 +238,6 @@ extension RCAction {
     /// 默认启用的操作（新用户首次加载）
     nonisolated(unsafe) static var defaultActions: [RCAction] = [.copyPath, .deleteDirect, .hideFileDir, .unhideFileDir]
 
-    /// 操作图标对应的颜色
-    static func iconColor(for icon: String) -> Color {
-        switch icon {
-        case "document.on.document": return .blue
-        case "trash.fill": return .red
-        case "moon.fill": return .secondary
-        case "sun.max.fill": return .orange
-        case "eye.slash", "eye.slash.fill": return .secondary
-        case "eye", "eye.fill": return .secondary
-        case "airplane", "airdrop", "wifi.radar", "bonjour", "paperplane.fill": return .teal
-        case "camera.viewfinder": return .orange
-        case "pencil.tip.cropview": return .orange
-        default: return .accentColor
-        }
-    }
-
     /// 操作图标对应的 NSColor（用于 FinderSync 扩展）
     static func nsIconColor(for icon: String) -> NSColor {
         switch icon {
@@ -353,19 +341,6 @@ extension NewFile {
         case ".pptx":   return "rectangle.stack.fill"
         case ".xlsx":   return "tablecells"
         default:        return "doc"
-        }
-    }
-
-    /// 文件扩展名 → 图标颜色
-    static func fileIconColor(for ext: String) -> Color {
-        switch ext.lowercased() {
-        case ".json": return .orange
-        case ".txt":  return .secondary
-        case ".md":   return .blue
-        case ".docx": return .blue
-        case ".pptx": return .red
-        case ".xlsx": return .green
-        default:      return .accentColor
         }
     }
 

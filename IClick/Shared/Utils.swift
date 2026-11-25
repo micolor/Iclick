@@ -98,6 +98,89 @@ public class Utils {
         return groupDir.appendingPathComponent("CustomIcons")
     }
 
+    // MARK: - SF Symbol 着色渲染缓存
+
+    /// 着色 SF Symbol（分层 / palette 渲染）的结果缓存。
+    ///
+    /// 设置列表拖拽排序时整屏重绘、Finder 每次重建菜单都会走渲染；
+    /// `NSImage.withSymbolConfiguration(_:)` 每次都是真实的光栅化工作，
+    /// 同一个图标一秒内可能被重复渲染几十次。key 覆盖所有影响输出的参数
+    /// （符号名、颜色分量、字号、字重、渲染方式、是否归一到菜单尺寸），
+    /// 输入相同则输出必然相同，复用同一个 NSImage 不改变观感。
+    ///
+    /// 渲染本身只在主线程发生；缓存加锁是为了让「读 key → 查缓存」这一步
+    /// 在任何调用入口都安全，锁的成本远低于重复光栅化。
+    nonisolated(unsafe) private static var tintedSymbolCache: [String: NSImage] = [:]
+    private static let tintedSymbolLock = NSLock()
+
+    static func tintedSymbol(
+        named name: String,
+        color: NSColor,
+        size: CGFloat,
+        weight: NSFont.Weight = .regular,
+        hierarchical: Bool = true,
+        normalizeToMenuSize: Bool = false
+    ) -> NSImage? {
+        // 用解析后的 RGB 做 key：动态色（secondaryLabelColor / controlAccentColor）
+        // 在浅色/深色或不同强调色下分量不同，避免把一种外观的渲染结果复用到另一种。
+        let colorHex = color.usingColorSpace(.sRGB).map { c in
+            String(format: "#%02X%02X%02X",
+                   Int(round(c.redComponent * 255)),
+                   Int(round(c.greenComponent * 255)),
+                   Int(round(c.blueComponent * 255)))
+        } ?? "?"
+        let key = "\(name):\(colorHex):\(size):\(weight.rawValue):\(hierarchical):\(normalizeToMenuSize)"
+
+        tintedSymbolLock.lock()
+        let cached = tintedSymbolCache[key]
+        tintedSymbolLock.unlock()
+        if let cached { return cached }
+
+        guard let symbol = NSImage(systemSymbolName: name, accessibilityDescription: nil) else {
+            return nil
+        }
+        var config = NSImage.SymbolConfiguration(pointSize: size, weight: weight)
+        if hierarchical {
+            config = config.applying(NSImage.SymbolConfiguration(hierarchicalColor: color))
+        } else {
+            config = config.applying(NSImage.SymbolConfiguration(paletteColors: [color]))
+        }
+        guard let tinted = symbol.withSymbolConfiguration(config) else { return nil }
+        tinted.isTemplate = false
+        if normalizeToMenuSize {
+            // Finder 菜单图标统一到 16×16 画布，保证菜单里视觉大小一致
+            tinted.size = NSSize(width: 16, height: 16)
+        }
+
+        tintedSymbolLock.lock()
+        tintedSymbolCache[key] = tinted
+        tintedSymbolLock.unlock()
+        return tinted
+    }
+
+    // MARK: - 文件 / 应用图标缓存
+
+    /// 按路径缓存系统图标。
+    ///
+    /// `NSWorkspace.shared.icon(forFile:)` 每次都会走 Icon Services；设置列表在
+    /// 开关切换、拖拽排序时整屏重绘，同一个 App 的图标一帧里可能被取好几次。
+    /// 图标随应用更新而变化的概率很低，进程内复用即可。
+    nonisolated(unsafe) private static var fileIconCache: [String: NSImage] = [:]
+    private static let fileIconLock = NSLock()
+
+    static func fileIcon(forPath path: String) -> NSImage {
+        fileIconLock.lock()
+        let cached = fileIconCache[path]
+        fileIconLock.unlock()
+        if let cached { return cached }
+
+        let icon = NSWorkspace.shared.icon(forFile: path)
+        fileIconLock.lock()
+        fileIconCache[path] = icon
+        fileIconLock.unlock()
+        return icon
+    }
+
     /// 从 NSOpenPanel 选择图片并复制到自定义图标目录，返回目标路径
     @MainActor
     @discardableResult

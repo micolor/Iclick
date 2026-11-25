@@ -21,7 +21,12 @@ struct GeneralSettingsTabView: View {
     /// 两者不通 → 开关状态在下次启动时丢失。
     @State private var showInDock = SharedSettings.bool(forKey: Key.showInDock)
     /// FDA 只在进入设置页 / 从系统设置切回来时探测，不在渲染期间反复读受保护文件。
-    @State private var fullDiskAccessStatus: Constants.FullDiskAccessStatus = Constants.fullDiskAccessStatus
+    ///
+    /// 注意：`@State` 的默认表达式是在**视图结构体每次初始化**时求值的，而父视图
+    /// 每刷新一次就会重新构造一个 GeneralSettingsTabView。把探测直接写在这里等于是
+    /// 每次重绘都打开一次 TCC 受保护文件。初始值给 .unknown，真正的探测放到
+    /// onAppear / onForeground（refreshPermissionStatus）。
+    @State private var fullDiskAccessStatus: Constants.FullDiskAccessStatus = .unknown
 
     @EnvironmentObject var appState: AppState
 
@@ -92,7 +97,8 @@ struct GeneralSettingsTabView: View {
         }
         .formStyle(.grouped)
         .onAppear {
-            extensionEnabled = FIFinderSyncController.isExtensionEnabled
+            // 进入设置页时做一次真实探测（同时更新扩展启用状态）
+            refreshPermissionStatus()
         }
         // 扩展启用状态只在用户离开本 App 去系统设置里改，回来时必然触发
         // didBecomeActive —— onForeground 已经覆盖了。原来那个 5 秒常驻定时器
