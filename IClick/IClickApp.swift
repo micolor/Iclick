@@ -26,7 +26,8 @@ struct IClickApp: App {
     @StateObject var appState = AppState.shared
 
     @StateObject private var updateManager = UpdateManager(
-        owner: "anwen",
+        // 与 README 里的发布页一致；之前写成个人账号 anwen，API 永远 404
+        owner: "micolor",
         repo: "IClick",
         currentVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.0"
     )

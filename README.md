@@ -2,7 +2,7 @@
 
 # IClick
 
-[![Swift 6.2](https://img.shields.io/badge/Swift-6.2-ED523F.svg?style=flat)](https://swift.org/) [![SwiftUI](https://img.shields.io/badge/SwiftUI-✓-orange)](https://developer.apple.com/xcode/swiftui/) [![macOS 15](https://img.shields.io/badge/macOS_15-Sequoia-green)](https://www.apple.com/macos/macos-sequoia/) [![Platform](https://img.shields.io/badge/platform-macOS-blue)]() [![Version](https://img.shields.io/badge/version-1.0.8-blue)](https://github.com/anwen/IClick/releases)
+[![Swift 6.2](https://img.shields.io/badge/Swift-6.2-ED523F.svg?style=flat)](https://swift.org/) [![SwiftUI](https://img.shields.io/badge/SwiftUI-✓-orange)](https://developer.apple.com/xcode/swiftui/) [![macOS 15](https://img.shields.io/badge/macOS_15-Sequoia-green)](https://www.apple.com/macos/macos-sequoia/) [![Platform](https://img.shields.io/badge/platform-macOS-blue)]() [![Version](https://img.shields.io/badge/version-1.0.8-blue)](https://github.com/micolor/IClick/releases)
 
 **IClick** 是一款 macOS 右键菜单增强工具，为 Finder 添加丰富实用的右键操作，让你的文件管理效率翻倍。
 

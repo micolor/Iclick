@@ -45,6 +45,10 @@
 
 ### Fixed
 
+- 更新器仓库地址：`anwen/IClick` 恒 404，改为 README 里的 `micolor/IClick`
+  （「打开发布页」链接与 README 徽章同步修正）。
+- 「下载并安装」不再只认 `.app.zip`：仓库实际只发布 `.dmg`，现在优先用
+  `.app.zip`，没有则挂载 `.dmg`、复制其中的 `.app`、卸载映像后再走原有校验与安装。
 - 「常用 App」打开目标项只发一次 open 事件（`NSWorkspace.open(_:withApplicationAt:)`）。
   原来是先 `openApplication` 启动应用、0.5 秒后再单独把路径交给它：Terminal 这类
   「启动就开一个窗口」的应用在自身没有窗口时，第一步的 reopen 先开一个空白窗口，

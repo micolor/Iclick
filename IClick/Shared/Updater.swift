@@ -216,6 +216,14 @@ class UpdateManager: ObservableObject {
 
     // MARK: - 下载和安装方法
 
+    /// 在 release 资产里挑一个可安装的包：优先 .app.zip（解压逻辑最直接），
+    /// 其次 .dmg。仓库历史上只发布过 .dmg，单认 .app.zip 会让「下载并安装」永远失败。
+    private func installableAsset(in release: GitHubRelease) -> GitHubRelease.Asset? {
+        let assets = release.assets
+        return assets.first { $0.name.lowercased().hasSuffix(".app.zip") }
+            ?? assets.first { $0.name.lowercased().hasSuffix(".dmg") }
+    }
+
     func downloadAndInstallUpdate() async {
         // 按钮在视图切到「正在下载」之前可以被连点；两个 Task 会用同一个临时
         // 文件名下载并可能并发安装。直接忽略重入。
@@ -226,8 +234,8 @@ class UpdateManager: ObservableObject {
             return
         }
 
-        guard let appZipAsset = release.assets.first(where: { $0.name.lowercased().hasSuffix(".app.zip") }) else {
-            updateError = "未找到 .app.zip 格式的应用程序包"
+        guard let asset = installableAsset(in: release) else {
+            updateError = "未找到可安装的更新包（.app.zip 或 .dmg）"
             return
         }
 
@@ -238,15 +246,15 @@ class UpdateManager: ObservableObject {
         var extractionRoot: URL?
 
         do {
-            let zipURL = try await downloadAsset(asset: appZipAsset)
-            downloadedURL = zipURL
+            let packageURL = try await downloadAsset(asset: asset)
+            downloadedURL = packageURL
 
             // GitHub 对新上传的资源会给出 sha256，有就先校验再解压
-            if let digest = appZipAsset.digest, digest.lowercased().hasPrefix("sha256:") {
-                try verifySHA256(fileURL: zipURL, expectedHex: String(digest.dropFirst("sha256:".count)))
+            if let digest = asset.digest, digest.lowercased().hasPrefix("sha256:") {
+                try verifySHA256(fileURL: packageURL, expectedHex: String(digest.dropFirst("sha256:".count)))
             }
 
-            let extracted = try await extractAppZip(zipURL: zipURL)
+            let extracted = try await prepareAppBundle(from: packageURL, assetName: asset.name)
             extractionRoot = extracted.root
 
             try verifyAppBundle(extracted.app)
@@ -395,7 +403,85 @@ class UpdateManager: ObservableObject {
         }
     }
 
-    // MARK: - 解压 APP Zip 文件
+    // MARK: - 从发布包中取出 .app
+
+    /// 按资产类型分发：.dmg 走挂载提取，其余（.app.zip）走解压。
+    private func prepareAppBundle(from fileURL: URL, assetName: String) async throws -> (app: URL, root: URL) {
+        if assetName.lowercased().hasSuffix(".dmg") {
+            return try await extractAppFromDMG(dmgURL: fileURL)
+        }
+        return try await extractAppZip(zipURL: fileURL)
+    }
+
+    /// 挂载 .dmg，把里面的 .app 复制出来，再卸载。
+    /// 必须复制：卸载后挂载点里的内容就没了，而 installApplication 需要一份稳定副本。
+    private func extractAppFromDMG(dmgURL: URL) async throws -> (app: URL, root: URL) {
+        let fileManager = FileManager.default
+        let extractionDir = fileManager.temporaryDirectory
+            .appendingPathComponent("app_extraction-\(UUID().uuidString)")
+        let mountPoint = extractionDir.appendingPathComponent("mnt")
+
+        do {
+            try fileManager.createDirectory(at: mountPoint, withIntermediateDirectories: true)
+
+            // 挂载、复制、卸载都是阻塞调用，整体放到主线程之外；
+            // defer 保证中途抛错时也会卸载，不会留下挂着的磁盘映像。
+            let copiedApp = try await Task.detached(priority: .userInitiated) { () -> URL in
+                defer {
+                    let detach = Process()
+                    detach.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
+                    detach.arguments = ["detach", "-force", mountPoint.path]
+                    detach.standardOutput = Pipe()
+                    detach.standardError = Pipe()
+                    try? detach.run()
+                    detach.waitUntilExit()
+                }
+
+                let attach = Process()
+                attach.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
+                attach.arguments = ["attach", "-nobrowse", "-readonly", "-noautoopen",
+                                    "-mountpoint", mountPoint.path, dmgURL.path]
+                let errorPipe = Pipe()
+                attach.standardOutput = Pipe()
+                attach.standardError = errorPipe
+                try attach.run()
+                attach.waitUntilExit()
+                guard attach.terminationStatus == 0 else {
+                    let data = errorPipe.fileHandleForReading.readDataToEndOfFile()
+                    let detail = String(data: data, encoding: .utf8) ?? "未知错误"
+                    throw InstallationError.mountFailed("挂载磁盘映像失败: \(detail)")
+                }
+
+                // .app 通常在根目录，也兼容「根目录下有一个子文件夹」的打包方式
+                let mounted = try FileManager.default.contentsOfDirectory(
+                    at: mountPoint, includingPropertiesForKeys: [.isDirectoryKey])
+                var appURL = mounted.first { $0.pathExtension == "app" }
+                if appURL == nil {
+                    for item in mounted {
+                        guard (try? item.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else { continue }
+                        let inner = try? FileManager.default.contentsOfDirectory(
+                            at: item, includingPropertiesForKeys: nil)
+                        if let found = inner?.first(where: { $0.pathExtension == "app" }) {
+                            appURL = found
+                            break
+                        }
+                    }
+                }
+                guard let appURL else {
+                    throw InstallationError.noAppFound("在磁盘映像中未找到.app应用程序")
+                }
+
+                let destination = extractionDir.appendingPathComponent(appURL.lastPathComponent)
+                try FileManager.default.copyItem(at: appURL, to: destination)
+                return destination
+            }.value
+
+            return (copiedApp, extractionDir)
+        } catch {
+            try? fileManager.removeItem(at: extractionDir)
+            throw error
+        }
+    }
 
     /// 解压 .app.zip，返回 (app 路径, 解压根目录)。
     /// 返回根目录是给调用方做清理用的（解压失败时也要能删掉残留）。
@@ -580,7 +666,7 @@ class UpdateManager: ObservableObject {
 
     // 打开GitHub发布页面
     func openReleasesPage() {
-        if let url = URL(string: "https://github.com/anwen/IClick/releases") {
+        if let url = URL(string: "https://github.com/micolor/IClick/releases") {
             NSWorkspace.shared.open(url)
         }
     }
@@ -600,6 +686,7 @@ class UpdateManager: ObservableObject {
 
     enum InstallationError: LocalizedError, Sendable {
         case zipExtractionFailed(String)
+        case mountFailed(String)
         case noAppFound(String)
         case invalidAppBundle(String)
         case permissionDenied(String)
@@ -608,6 +695,8 @@ class UpdateManager: ObservableObject {
         var errorDescription: String? {
             switch self {
             case .zipExtractionFailed(let message):
+                return message
+            case .mountFailed(let message):
                 return message
             case .noAppFound(let message):
                 return message
