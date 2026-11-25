@@ -20,21 +20,52 @@ public enum LaunchAtLogin {
     */
     public static var isEnabled: Bool {
         get { SMAppService.mainApp.status == .enabled }
-        set {
-            observable.objectWillChange.send()
+        set { setEnabled(newValue) }
+    }
 
-            do {
-                if newValue {
-                    if SMAppService.mainApp.status == .enabled {
-                        try? SMAppService.mainApp.unregister()
+    /// 「已登记为登录项」，包含 `.requiresApproval`（已在系统里登记、等待用户在
+    /// 系统设置中批准）。设置页的开关用它，否则待批准状态会显示成「关」，
+    /// 用户再去开一次只会得到一个看似无效的开关。
+    public static var isRegistered: Bool {
+        let status = SMAppService.mainApp.status
+        return status == .enabled || status == .requiresApproval
+    }
+
+    /// - Parameter openApprovalSettings: 需要用户批准时是否打开系统设置的登录项页面。
+    ///   只有设置页的手动开关传 true；启动时自动重指登录项不传，避免每次启动都弹系统设置。
+    public static func setEnabled(_ enabled: Bool, openApprovalSettings: Bool = false) {
+        observable.objectWillChange.send()
+
+        let wasEnabled = SMAppService.mainApp.status == .enabled
+        do {
+            if enabled {
+                let status = SMAppService.mainApp.status
+                // 已经在等批准：再 register 只会报错，直接把用户带到批准页面
+                if status == .requiresApproval {
+                    if openApprovalSettings {
+                        SMAppService.openSystemSettingsLoginItems()
                     }
-
-                    try SMAppService.mainApp.register()
-                } else {
-                    try SMAppService.mainApp.unregister()
+                    return
                 }
-            } catch {
-                logger.error("Failed to \(newValue ? "enable" : "disable") launch at login: \(error.localizedDescription)")
+                if status == .enabled {
+                    try? SMAppService.mainApp.unregister()
+                }
+
+                try SMAppService.mainApp.register()
+
+                // 新注册在 macOS 上可能进入「等待批准」，顺手把用户带过去
+                if openApprovalSettings, SMAppService.mainApp.status == .requiresApproval {
+                    SMAppService.openSystemSettingsLoginItems()
+                }
+            } else {
+                try SMAppService.mainApp.unregister()
+            }
+        } catch {
+            logger.error("Failed to \(enabled ? "enable" : "disable") launch at login: \(error.localizedDescription)")
+            // 开启失败时尽力恢复原来的登录项：上面为了重指路径先 unregister 了，
+            // 不回滚的话用户会「点了开启，结果反而被关掉」。
+            if enabled, wasEnabled {
+                try? SMAppService.mainApp.register()
             }
         }
     }
@@ -54,9 +85,10 @@ public enum LaunchAtLogin {
 extension LaunchAtLogin {
     final class Observable: ObservableObject {
         var isEnabled: Bool {
-            get { LaunchAtLogin.isEnabled }
+            // 设置页开关反映「已登记（含待批准）」；内部逻辑仍用 LaunchAtLogin.isEnabled
+            get { LaunchAtLogin.isRegistered }
             set {
-                LaunchAtLogin.isEnabled = newValue
+                LaunchAtLogin.setEnabled(newValue, openApprovalSettings: true)
             }
         }
     }

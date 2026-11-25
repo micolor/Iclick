@@ -77,6 +77,7 @@ struct ActionSettingsTabView: View {
     @State private var editingAction: RCAction? = nil
     @State private var editingSubmenu: SubmenuEditInfo? = nil
     @State private var showAddSheet = false
+    @State private var showResetConfirm = false
 
 
     /// 可恢复的操作项（预定义中不在列表中的）
@@ -240,9 +241,17 @@ struct ActionSettingsTabView: View {
                         }
                     }
                     Button {
-                        appState.resetMenuItems()
+                        showResetConfirm = true
                     } label: {
                         Label("重置", systemImage: "arrow.triangle.2.circlepath")
+                    }
+                    .confirmationDialog("确定要重置右键菜单吗？", isPresented: $showResetConfirm, titleVisibility: .visible) {
+                        // 操作项、顺序、子菜单开关会恢复默认，自定义的子菜单名称/图标
+                        // 以及 App 在菜单里的位置也会一并清除。
+                        Button("重置", role: .destructive) {
+                            appState.resetMenuItems()
+                        }
+                        Button("取消", role: .cancel) {}
                     }
                 }
             }
@@ -277,20 +286,30 @@ struct ActionSettingsTabView: View {
             )
         }
         .sheet(item: $editingAction) { action in
-            ActionEditSheet(action: action) { name, icon, requireSelection in
-                if let idx = appState.actions.firstIndex(where: { $0.id == action.id }) {
-                    appState.actions[idx].name = name
-                    appState.actions[idx].icon = icon
-                    appState.actions[idx].requireSelection = requireSelection
-                    appState.toggleActionItem()
+            ActionEditSheet(action: action) { result in
+                switch result {
+                case .save(let name, let icon, let requireSelection):
+                    if let idx = appState.actions.firstIndex(where: { $0.id == action.id }) {
+                        appState.actions[idx].name = name
+                        appState.actions[idx].icon = icon
+                        appState.actions[idx].requireSelection = requireSelection
+                        appState.toggleActionItem()
+                    }
+                case .cancel:
+                    break
                 }
                 editingAction = nil
             }
         }
         .sheet(item: $editingSubmenu) { submenu in
-            SubmenuEditSheet(id: submenu.id, name: submenu.name, icon: submenuIcon(for: submenu.id)) { newName, newIcon in
-                // 之前这里把 newName 丢掉了，改名字等于没改
-                saveSubmenu(name: newName, icon: newIcon, for: submenu.id)
+            SubmenuEditSheet(id: submenu.id, name: submenu.name, icon: submenuIcon(for: submenu.id)) { result in
+                switch result {
+                case .save(let newName, let newIcon):
+                    // 之前这里把 newName 丢掉了，改名字等于没改
+                    saveSubmenu(name: newName, icon: newIcon, for: submenu.id)
+                case .cancel:
+                    break
+                }
                 editingSubmenu = nil
             }
         }
@@ -747,9 +766,16 @@ struct SubmenuEditInfo: Identifiable {
 
 // MARK: - 操作编辑 Sheet
 
+enum ActionEditResult {
+    case save(name: String, icon: String, requireSelection: Bool)
+    /// 取消必须是独立结果：之前「取消」也走保存回调，会白写一次配置并递增
+    /// 版本号，还能用弹窗打开时的旧快照把期间的外部改动顶回去。
+    case cancel
+}
+
 struct ActionEditSheet: View {
     let action: RCAction
-    let onResult: (String, String, Bool) -> Void
+    let onResult: (ActionEditResult) -> Void
 
     @State private var actionName: String = ""
     @State private var actionIcon: String = ""
@@ -840,12 +866,12 @@ struct ActionEditSheet: View {
                 Spacer()
 
                 Button("取消") {
-                    onResult(action.name, action.icon, action.requireSelection)
+                    onResult(.cancel)
                 }
                 .keyboardShortcut(.cancelAction)
 
                 Button("保存") {
-                    onResult(actionName, actionIcon, requireSelection)
+                    onResult(.save(name: actionName, icon: actionIcon, requireSelection: requireSelection))
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(actionName.trimmingCharacters(in: .whitespaces).isEmpty)
@@ -1188,11 +1214,16 @@ struct IconGridItem: View {
 
 // MARK: - 子菜单编辑 Sheet
 
+enum SubmenuEditResult {
+    case save(name: String, icon: String)
+    case cancel
+}
+
 struct SubmenuEditSheet: View {
     let id: String
     let name: String
     let icon: String
-    let onResult: (String, String) -> Void
+    let onResult: (SubmenuEditResult) -> Void
 
     @State private var submenuName: String = ""
     @State private var submenuIcon: String = ""
@@ -1272,12 +1303,12 @@ struct SubmenuEditSheet: View {
                 Spacer()
 
                 Button("取消") {
-                    onResult(name, icon)
+                    onResult(.cancel)
                 }
                 .keyboardShortcut(.cancelAction)
 
                 Button("保存") {
-                    onResult(submenuName, submenuIcon)
+                    onResult(.save(name: submenuName, icon: submenuIcon))
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(submenuName.trimmingCharacters(in: .whitespaces).isEmpty)

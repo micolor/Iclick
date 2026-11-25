@@ -13,6 +13,7 @@ struct AppsSettingsTabView: View {
     @State private var editingItem: OpenWithApp? = nil
     @State private var draggedItem: OpenWithApp? = nil
     @State private var dropTargetId: String? = nil
+    @State private var showResetConfirm = false
 
 
     var body: some View {
@@ -60,13 +61,17 @@ struct AppsSettingsTabView: View {
                         Label("添加", systemImage: "plus")
                     }
                     Button {
-                        // 和「文件类型」那个重置保持一致：回到首次加载时的默认列表。
-                        // 原来是 removeAll()，一点就把用户加过的应用全清空、且不可恢复
-                        // （AppState.load 对空数组不会回退到默认值）。
-                        appState.apps = OpenWithApp.defaultApps
-                        appState.sync()
+                        showResetConfirm = true
                     } label: {
                         Label("重置", systemImage: "arrow.triangle.2.circlepath")
+                    }
+                    .confirmationDialog("确定要恢复默认常用 App 吗？", isPresented: $showResetConfirm, titleVisibility: .visible) {
+                        // 用户添加的 App、自定义显示名/图标都会被默认列表覆盖。
+                        Button("恢复默认", role: .destructive) {
+                            appState.apps = OpenWithApp.defaultApps
+                            appState.sync()
+                        }
+                        Button("取消", role: .cancel) {}
                     }
                 }
             }
@@ -291,7 +296,10 @@ struct AppEditSheet: View {
                         showIconPicker = true
                     } label: {
                         HStack(spacing: 8) {
-                            if !appIcon.isEmpty && appIcon != item.icon {
+                            if !appIcon.isEmpty {
+                                // 已保存的自定义图标也要显示；只有挂到 item.icon 上才
+                                // 算「本次没改」，否则重新打开编辑页看到的永远是原生图标，
+                                // 会让人以为自定义图标没保存。
                                 if appIcon.contains("/") {
                                     CustomIconView(path: appIcon, size: 24)
                                 } else {

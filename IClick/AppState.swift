@@ -273,7 +273,8 @@ class AppState: ObservableObject {
         try? save()
     }
 
-    /// 重置右键菜单所有设置（操作项、子菜单顺序、子菜单开关）
+    /// 重置右键菜单所有设置（操作项、子菜单顺序、子菜单开关、
+    /// 自定义的子菜单名称/图标、App 是否挂在主菜单）
     @MainActor func resetMenuItems() {
         actions = RCAction.defaultActions
         submenuOrder = Self.defaultSubmenuOrder
@@ -282,6 +283,17 @@ class AppState: ObservableObject {
         // 漏掉这个开关时，用户关掉「常用 App」子菜单后点「重置」，
         // 其余菜单项都恢复了，只有它还是关的。默认值见 showApps getter。
         showApps = true
+        // 子菜单名字/图标也存在同一份配置里，重置只恢复一半的话，用户会看到
+        // 「重置了但子菜单还是我改过的名字」。键名带 id，只能按键前缀清理。
+        for key in SharedSettings.load().keys
+        where key.hasPrefix("submenu_name_") || key.hasPrefix("submenu_icon_") {
+            SharedSettings.removeObject(forKey: key)
+        }
+        // 「移除」操作只是把 App 的 showInMainMenu 翻成 false，并没有从数组删除；
+        // 重置时一并恢复默认（默认值见 OpenWithApp.showInMainMenu = false）。
+        for idx in apps.indices where apps[idx].showInMainMenu {
+            apps[idx].showInMainMenu = false
+        }
         // 原来这里还有个 try? save() 紧跟着 sync()，一次重置要整份配置写两遍
         sync()
     }

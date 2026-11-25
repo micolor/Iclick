@@ -315,10 +315,13 @@ class UpdateManager: ObservableObject {
             throw InstallationError.integrityCheckFailed("更新包签名校验失败：\(detail)")
         }
 
-        // 3. 签名 Team ID 必须与当前应用一致
-        if let currentTeam = teamIdentifier(of: Bundle.main.bundleURL),
-           let newTeam = teamIdentifier(of: appURL),
-           currentTeam != newTeam {
+        // 3. 签名 Team ID 必须与当前应用一致。任何一边读不到都按失败处理：
+        // ad-hoc 签名没有 Team ID，不能因为「取不到」就跳过这层校验。
+        guard let currentTeam = teamIdentifier(of: Bundle.main.bundleURL),
+              let newTeam = teamIdentifier(of: appURL) else {
+            throw InstallationError.integrityCheckFailed("无法读取更新包或当前应用的签名主体，已中止安装")
+        }
+        guard currentTeam == newTeam else {
             throw InstallationError.integrityCheckFailed("更新包签名主体与当前应用不一致，已中止安装")
         }
     }

@@ -33,6 +33,7 @@ struct NewFileSettingsTabView: View {
     @State private var isAdding = false
     @State private var draggedItem: NewFile? = nil
     @State private var dropTargetId: String? = nil
+    @State private var showResetConfirm = false
 
     var body: some View {
         Form {
@@ -72,10 +73,17 @@ struct NewFileSettingsTabView: View {
                         Label("添加", systemImage: "plus")
                     }
                     Button {
-                        appState.newFiles = NewFile.all
-                        appState.sync()
+                        showResetConfirm = true
                     } label: {
                         Label("重置", systemImage: "arrow.triangle.2.circlepath")
+                    }
+                    .confirmationDialog("确定要恢复默认文件类型吗？", isPresented: $showResetConfirm, titleVisibility: .visible) {
+                        // 整张表会被默认列表覆盖：自定义的类型、名称、图标、打开方式都会丢失。
+                        Button("恢复默认", role: .destructive) {
+                            appState.newFiles = NewFile.all
+                            appState.sync()
+                        }
+                        Button("取消", role: .cancel) {}
                     }
                 }
             }

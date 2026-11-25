@@ -568,6 +568,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             let allowed = decodedTarget.filter { path in
                 if Utils.isProtectedFolder(path) {
                     logger.warning("跳过受保护的文件路径: \(path)")
+                    DiagnosticLog.shared.write("hide blocked protected path=\(path)")
                     return false
                 }
                 return true
@@ -586,6 +587,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             // 拦掉反而会把人困住。
             if Utils.isSystemFolder(dirPath) {
                 logger.warning("跳过系统目录，不对其内容做整体隐藏: \(dirPath)")
+                DiagnosticLog.shared.write("hide blocked system dir=\(dirPath)")
                 return
             }
             setDirContentsHidden(dirPath: dirPath, hidden: true)
@@ -992,6 +994,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 alert.addButton(withTitle: "确定")
                 alert.runModal()
                 logger.warning("试图删除受保护的系统文件夹，操作已被阻止: \(decodedPath)")
+                DiagnosticLog.shared.write("delete blocked protected path=\(decodedPath)")
                 continue
             }
 
