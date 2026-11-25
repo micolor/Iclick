@@ -181,9 +181,13 @@ PLATFORM_VERSION=(-Xlinker -platform_version -Xlinker macos
 OUT="$BUILD_DIR/out"
 mkdir -p "$OUT"
 
-log "编译主应用（-Onone，与用户原版的 Debug 构建对齐）"
+# 优化级别：默认 -Onone（与用户原版的 Debug 构建对齐，便于逐行调试）。
+# 日常自用或发版可传 OPT_LEVEL=-O 换 Release 级别优化。
+OPT_LEVEL="${OPT_LEVEL:--Onone}"
+
+log "编译主应用（${OPT_LEVEL}）"
 "$SWIFTC" -c -o "$OUT/app.o" \
-    -sdk "$SDK" -target "$DEPLOY_TARGET" -swift-version 6 -Onone \
+    -sdk "$SDK" -target "$DEPLOY_TARGET" -swift-version 6 "$OPT_LEVEL" \
     -whole-module-optimization -module-name IClick -plugin-path "$PLUGIN_PATH" \
     "$REPO_ROOT"/IClick/*.swift "$REPO_ROOT"/IClick/Model/*.swift \
     "$REPO_ROOT"/IClick/Settings/*.swift "$REPO_ROOT"/IClick/Shared/*.swift \
@@ -202,7 +206,7 @@ log "编译 FinderSync 扩展"
 # 扩展不编译仅在主应用使用的 Shared 文件（更新器/登录项/设置页 SwiftUI 扩展）。
 # 这些文件 import SwiftUI / ServiceManagement / CryptoKit，编进扩展会让
 # FinderSyncExt 启动时就加载这些框架，显著抬高它的内存峰值。
-EXT_EXCLUDED_SHARED=("Updater.swift" "UpdaterView.swift" "LaunchAtLogin.swift" "Extension+.swift")
+EXT_EXCLUDED_SHARED=("Updater.swift" "UpdaterView.swift" "LaunchAtLogin.swift" "Extension+.swift" "UpdateAsset.swift")
 EXT_SHARED_FILES=()
 for f in "$REPO_ROOT"/IClick/Shared/*.swift; do
     base="${f##*/}"
@@ -214,7 +218,7 @@ for f in "$REPO_ROOT"/IClick/Shared/*.swift; do
 done
 
 "$SWIFTC" -c -o "$OUT/ext.o" \
-    -sdk "$SDK" -target "$DEPLOY_TARGET" -swift-version 6 -Onone \
+    -sdk "$SDK" -target "$DEPLOY_TARGET" -swift-version 6 "$OPT_LEVEL" \
     -whole-module-optimization -application-extension -module-name FinderSyncExt \
     -plugin-path "$PLUGIN_PATH" \
     "$REPO_ROOT"/FinderSyncExt/*.swift "$REPO_ROOT"/IClick/AppState.swift \

@@ -111,6 +111,10 @@ public class Utils {
     /// 渲染本身只在主线程发生；缓存加锁是为了让「读 key → 查缓存」这一步
     /// 在任何调用入口都安全，锁的成本远低于重复光栅化。
     nonisolated(unsafe) private static var tintedSymbolCache: [String: NSImage] = [:]
+    /// 插入顺序即访问顺序（命中时移到末尾），淘汰最久未用的。
+    nonisolated(unsafe) private static var tintedSymbolOrder: [String] = []
+    /// 正常配置远达不到这个量；设上限只为防止长时间运行后无限增长。
+    private static let tintedSymbolCacheLimit = 256
     private static let tintedSymbolLock = NSLock()
 
     static func tintedSymbol(
@@ -132,9 +136,15 @@ public class Utils {
         let key = "\(name):\(colorHex):\(size):\(weight.rawValue):\(hierarchical):\(normalizeToMenuSize)"
 
         tintedSymbolLock.lock()
-        let cached = tintedSymbolCache[key]
+        if let cached = tintedSymbolCache[key] {
+            if let idx = tintedSymbolOrder.firstIndex(of: key) {
+                tintedSymbolOrder.remove(at: idx)
+            }
+            tintedSymbolOrder.append(key)
+            tintedSymbolLock.unlock()
+            return cached
+        }
         tintedSymbolLock.unlock()
-        if let cached { return cached }
 
         guard let symbol = NSImage(systemSymbolName: name, accessibilityDescription: nil) else {
             return nil
@@ -154,6 +164,12 @@ public class Utils {
 
         tintedSymbolLock.lock()
         tintedSymbolCache[key] = tinted
+        tintedSymbolOrder.removeAll { $0 == key }
+        tintedSymbolOrder.append(key)
+        while tintedSymbolOrder.count > tintedSymbolCacheLimit {
+            let oldest = tintedSymbolOrder.removeFirst()
+            tintedSymbolCache.removeValue(forKey: oldest)
+        }
         tintedSymbolLock.unlock()
         return tinted
     }
@@ -166,17 +182,31 @@ public class Utils {
     /// 开关切换、拖拽排序时整屏重绘，同一个 App 的图标一帧里可能被取好几次。
     /// 图标随应用更新而变化的概率很低，进程内复用即可。
     nonisolated(unsafe) private static var fileIconCache: [String: NSImage] = [:]
+    nonisolated(unsafe) private static var fileIconOrder: [String] = []
+    private static let fileIconCacheLimit = 128
     private static let fileIconLock = NSLock()
 
     static func fileIcon(forPath path: String) -> NSImage {
         fileIconLock.lock()
-        let cached = fileIconCache[path]
+        if let cached = fileIconCache[path] {
+            if let idx = fileIconOrder.firstIndex(of: path) {
+                fileIconOrder.remove(at: idx)
+            }
+            fileIconOrder.append(path)
+            fileIconLock.unlock()
+            return cached
+        }
         fileIconLock.unlock()
-        if let cached { return cached }
 
         let icon = NSWorkspace.shared.icon(forFile: path)
         fileIconLock.lock()
         fileIconCache[path] = icon
+        fileIconOrder.removeAll { $0 == path }
+        fileIconOrder.append(path)
+        while fileIconOrder.count > fileIconCacheLimit {
+            let oldest = fileIconOrder.removeFirst()
+            fileIconCache.removeValue(forKey: oldest)
+        }
         fileIconLock.unlock()
         return icon
     }

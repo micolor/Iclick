@@ -36,6 +36,7 @@ echo "==> 编译 smoke tests ($ARCH, SDK $(basename "$SDK"))"
     "$REPO_ROOT/IClick/Shared/Messager.swift" \
     "$REPO_ROOT/IClick/Shared/DiagnosticLog.swift" \
     "$REPO_ROOT/IClick/Shared/MessageDeduplicator.swift" \
+    "$REPO_ROOT/IClick/Shared/UpdateAsset.swift" \
     "$REPO_ROOT/IClick/Model/RCBase.swift"
 
 echo "==> 运行"

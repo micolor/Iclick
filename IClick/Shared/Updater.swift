@@ -219,9 +219,9 @@ class UpdateManager: ObservableObject {
     /// 在 release 资产里挑一个可安装的包：优先 .app.zip（解压逻辑最直接），
     /// 其次 .dmg。仓库历史上只发布过 .dmg，单认 .app.zip 会让「下载并安装」永远失败。
     private func installableAsset(in release: GitHubRelease) -> GitHubRelease.Asset? {
-        let assets = release.assets
-        return assets.first { $0.name.lowercased().hasSuffix(".app.zip") }
-            ?? assets.first { $0.name.lowercased().hasSuffix(".dmg") }
+        // 挑选规则放在 UpdateAssetSelector 里，便于用冒烟测试覆盖
+        guard let idx = UpdateAssetSelector.pickIndex(from: release.assets.map(\.name)) else { return nil }
+        return release.assets[idx]
     }
 
     func downloadAndInstallUpdate() async {

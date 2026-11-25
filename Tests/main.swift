@@ -123,6 +123,27 @@ do {
 // 默认 App 的 id 固定（跨进程匹配依赖它）；环境里装没装这些 App 不影响断言。
 check(OpenWithApp.defaultApps.allSatisfy { $0.id.contains(".") }, "默认 App 使用固定 bundle id")
 
+// MARK: - 文件类型图标解析
+
+func fileType(ext: String, icon: String) -> NewFile {
+    NewFile(ext: ext, name: "T", idx: 0, icon: icon)
+}
+check(NewFile.resolvedSymbolName(for: fileType(ext: ".txt", icon: "star.fill")) == "star.fill",
+      "图标解析: 自定义 SF Symbol 生效")
+check(NewFile.resolvedSymbolName(for: fileType(ext: ".md", icon: "icon-file-md")) == NewFile.sfSymbolName(for: ".md"),
+      "图标解析: Asset 名回退到扩展名默认")
+check(NewFile.resolvedSymbolName(for: fileType(ext: ".txt", icon: "")) == "doc.text",
+      "图标解析: 空图标回退")
+check(NewFile.resolvedSymbolName(for: fileType(ext: ".txt", icon: "/tmp/icon.png")) == "doc.text",
+      "图标解析: 图片路径回退")
+
+// MARK: - 更新包资产选择
+
+check(UpdateAssetSelector.pickIndex(from: ["a.dmg", "b.app.zip"]) == 1, "更新包: 优先 .app.zip")
+check(UpdateAssetSelector.pickIndex(from: ["a.dmg"]) == 0, "更新包: 只有 dmg 时选 dmg")
+check(UpdateAssetSelector.pickIndex(from: ["A.DMG"]) == 0, "更新包: 后缀大小写不敏感")
+check(UpdateAssetSelector.pickIndex(from: ["a.zip", "b.pkg"]) == nil, "更新包: 没有可安装包返回 nil")
+
 print("")
 if failures == 0 {
     print("全部通过")

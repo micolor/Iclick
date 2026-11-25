@@ -25,6 +25,11 @@
 
 ### Changed
 
+- 图标着色与系统文件/应用图标缓存加 LRU 上限（256 / 128 项），长时间运行不再无界增长。
+- 删除 `Assets.xcassets` 里重复的 `template.xlsx`，模板只保留 `IClick/Resources/` 一份。
+- `scripts/build-local.sh` 支持 `OPT_LEVEL`：默认仍为 `-Onone`，自用或发版可设 `-O`。
+- 冒烟测试新增文件类型图标解析与更新包资产选择的断言（资产挑选逻辑抽到
+  `Shared/UpdateAsset.swift`，不依赖 SwiftUI）。
 - 扩展的动作投递不再占用 Finder 主线程：阻塞式 socket 往返（最长 1 秒/次）移到
   后台队列，重试调度仍在主线程；存活判断改为按 bundle id 直接查询 `NSRunningApplication`。
 - 主应用保存配置从「每个段一次读-改-写」（5 段 ≈ 10 次文件写）合并为一次原子写；

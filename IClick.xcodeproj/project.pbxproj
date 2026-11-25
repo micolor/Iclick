@@ -31,6 +31,7 @@
 		5C68BFE12C6651B80011C096 /* Extension+.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C68BFE02C6651B80011C096 /* Extension+.swift */; };
 		5C68BFE62C67707D0011C096 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 5C119D0C2BBE9B9B00B2D7C4 /* Assets.xcassets */; };
 		A10C00042E9C000100000004 /* LocalIPC.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10C00012E9C000100000001 /* LocalIPC.swift */; };
+		5CA7D0C12E9B100100AABB08 /* UpdateAsset.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CA7D0C12E9B100100AABB07 /* UpdateAsset.swift */; };
 		A10C00052E9C000100000005 /* DiagnosticLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10C00022E9C000100000002 /* DiagnosticLog.swift */; };
 		A10C00062E9C000100000006 /* MessageDeduplicator.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10C00032E9C000100000003 /* MessageDeduplicator.swift */; };
 		A10C00072E9C000100000007 /* LocalIPC.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10C00012E9C000100000001 /* LocalIPC.swift */; };
@@ -129,6 +130,7 @@
 		5CDFE3172CA3D66000AE6C95 /* Constants.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Constants.swift; sourceTree = "<group>"; };
 		5CFA85732D1477AD0063A6A1 /* LaunchAtLogin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LaunchAtLogin.swift; sourceTree = "<group>"; };
 		A10C00012E9C000100000001 /* LocalIPC.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalIPC.swift; sourceTree = "<group>"; };
+		5CA7D0C12E9B100100AABB07 /* UpdateAsset.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateAsset.swift; sourceTree = "<group>"; };
 		A10C00022E9C000100000002 /* DiagnosticLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticLog.swift; sourceTree = "<group>"; };
 		A10C00032E9C000100000003 /* MessageDeduplicator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageDeduplicator.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -224,6 +226,7 @@
 				5C34BAA42D943AF100CF8128 /* Utils.swift */,
 				5CDFE3172CA3D66000AE6C95 /* Constants.swift */,
 				5C50D2812BBFB33200DF31AA /* StringExtension.swift */,
+				5CA7D0C12E9B100100AABB07 /* UpdateAsset.swift */,
 				5CC9F0992BC5445C00AF9B81 /* Messager.swift */,
 				5C4288652BDA5536000C0828 /* AppLogger.swift */,
 				A10C00012E9C000100000001 /* LocalIPC.swift */,
@@ -398,6 +401,7 @@
 				5C158AA92BC64654006EC625 /* GeneralSettingsTabView.swift in Sources */,
 				5C68BFE12C6651B80011C096 /* Extension+.swift in Sources */,
 				A10C00042E9C000100000004 /* LocalIPC.swift in Sources */,
+				5CA7D0C12E9B100100AABB08 /* UpdateAsset.swift in Sources */,
 				A10C00052E9C000100000005 /* DiagnosticLog.swift in Sources */,
 				A10C00062E9C000100000006 /* MessageDeduplicator.swift in Sources */,
 				5C119D072BBE9B9900B2D7C4 /* IClickApp.swift in Sources */,
