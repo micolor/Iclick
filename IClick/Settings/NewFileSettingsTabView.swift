@@ -236,22 +236,18 @@ struct NewFileSettingsTabView: View {
         appState.sync()
     }
 
-    /// 获取文件类型的图标
+    /// 获取文件类型的图标（来源判定统一在 NewFile.iconSource，三处共用）
     @ViewBuilder
     private func systemIcon(for item: NewFile) -> some View {
-        let icon = item.icon
-        if icon.contains("/") {
-            // 自定义图片路径
-            CustomIconView(path: icon, size: 18)
-        } else if NSImage(named: icon) != nil {
-            // Asset catalog 图片
-            Image(icon)
+        switch NewFile.iconSource(for: item) {
+        case .path(let path):
+            CustomIconView(path: path, size: 18)
+        case .asset(let name):
+            Image(name)
                 .resizable()
                 .aspectRatio(contentMode: .fit)
                 .frame(width: 18, height: 18)
-        } else {
-            // SF Symbol：用户选过的图标优先，没选过才按扩展名推导
-            let sfName = NewFile.resolvedSymbolName(for: item)
+        case .symbol(let sfName):
             if let nsImage = tintedSymbol(named: sfName, color: NewFile.nsFileIconColor(for: item.ext), size: 16) {
                 Image(nsImage: nsImage)
                     .resizable()
@@ -541,14 +537,16 @@ struct NewFileEditSheet: View {
                     .foregroundStyle(NewFile.fileIconColor(for: ext))
             }
         } else if let item = item {
-            // 使用默认图标
-            if NSImage(named: item.icon) != nil {
-                Image(item.icon)
+            // 使用已保存的图标（来源判定与列表、Finder 菜单共用）
+            switch NewFile.iconSource(for: item) {
+            case .path(let itemPath):
+                CustomIconView(path: itemPath, size: 24)
+            case .asset(let name):
+                Image(name)
                     .resizable()
                     .aspectRatio(contentMode: .fit)
                     .frame(width: 24, height: 24)
-            } else {
-                let sfName = NewFile.resolvedSymbolName(for: item)
+            case .symbol(let sfName):
                 if let nsImage = tintedSymbol(named: sfName, color: NewFile.nsFileIconColor(for: item.ext), size: 20) {
                     Image(nsImage: nsImage)
                         .resizable()

@@ -9,6 +9,11 @@
 /* Begin PBXBuildFile section */
 		5C043AC32BEB7C1200C837D1 /* AppLogger.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C4288652BDA5536000C0828 /* AppLogger.swift */; };
 		5C119D072BBE9B9900B2D7C4 /* IClickApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C119D062BBE9B9900B2D7C4 /* IClickApp.swift */; };
+		5CA7D0C12E9B100100AABB22 /* AppDelegate+Open.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CA7D0C12E9B100100AABB21 /* AppDelegate+Open.swift */; };
+		5CA7D0C12E9B100100AABB24 /* AppDelegate+Clipboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CA7D0C12E9B100100AABB23 /* AppDelegate+Clipboard.swift */; };
+		5CA7D0C12E9B100100AABB26 /* AppDelegate+Hide.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CA7D0C12E9B100100AABB25 /* AppDelegate+Hide.swift */; };
+		5CA7D0C12E9B100100AABB28 /* AppDelegate+Delete.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CA7D0C12E9B100100AABB27 /* AppDelegate+Delete.swift */; };
+		5CA7D0C12E9B100100AABB2A /* AppDelegate+FileActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CA7D0C12E9B100100AABB29 /* AppDelegate+FileActions.swift */; };
 		5C119D0D2BBE9B9B00B2D7C4 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 5C119D0C2BBE9B9B00B2D7C4 /* Assets.xcassets */; };
 		5C119D102BBE9B9B00B2D7C4 /* Preview Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 5C119D0F2BBE9B9B00B2D7C4 /* Preview Assets.xcassets */; };
 		5C119D182BBE9C8F00B2D7C4 /* MenuBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C119D172BBE9C8F00B2D7C4 /* MenuBarView.swift */; };
@@ -55,6 +60,9 @@
 		5CC9F09A2BC5445C00AF9B81 /* Messager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CC9F0992BC5445C00AF9B81 /* Messager.swift */; };
 		5CC9F09B2BC5464400AF9B81 /* Messager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CC9F0992BC5445C00AF9B81 /* Messager.swift */; };
 		5CC9F09D2BC567F000AF9B81 /* ActionSettingsTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CC9F09C2BC567F000AF9B81 /* ActionSettingsTabView.swift */; };
+		5CA7D0C12E9B100100AABB12 /* ActionEditSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CA7D0C12E9B100100AABB11 /* ActionEditSheet.swift */; };
+		5CA7D0C12E9B100100AABB14 /* IconPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CA7D0C12E9B100100AABB13 /* IconPicker.swift */; };
+		5CA7D0C12E9B100100AABB16 /* SubmenuEditSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CA7D0C12E9B100100AABB15 /* SubmenuEditSheet.swift */; };
 		5CDFE3162CA3D65000AE6C95 /* SettingsWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CDFE3152CA3D63B00AE6C95 /* SettingsWindow.swift */; };
 		5CDFE3182CA3D66B00AE6C95 /* Constants.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CDFE3172CA3D66000AE6C95 /* Constants.swift */; };
 		5CDFE3192CA3D66B00AE6C95 /* Constants.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CDFE3172CA3D66000AE6C95 /* Constants.swift */; };
@@ -93,6 +101,11 @@
 /* Begin PBXFileReference section */
 		5C119D032BBE9B9900B2D7C4 /* Iclick.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Iclick.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		5C119D062BBE9B9900B2D7C4 /* IClickApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IClickApp.swift; sourceTree = "<group>"; };
+		5CA7D0C12E9B100100AABB21 /* AppDelegate+Open.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppDelegate+Open.swift"; sourceTree = "<group>"; };
+		5CA7D0C12E9B100100AABB23 /* AppDelegate+Clipboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppDelegate+Clipboard.swift"; sourceTree = "<group>"; };
+		5CA7D0C12E9B100100AABB25 /* AppDelegate+Hide.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppDelegate+Hide.swift"; sourceTree = "<group>"; };
+		5CA7D0C12E9B100100AABB27 /* AppDelegate+Delete.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppDelegate+Delete.swift"; sourceTree = "<group>"; };
+		5CA7D0C12E9B100100AABB29 /* AppDelegate+FileActions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppDelegate+FileActions.swift"; sourceTree = "<group>"; };
 		5C119D0C2BBE9B9B00B2D7C4 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		5C119D0F2BBE9B9B00B2D7C4 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
 		5C119D112BBE9B9B00B2D7C4 /* IClick.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = IClick.entitlements; sourceTree = "<group>"; };
@@ -125,6 +138,9 @@
 		5CB470D42CEB7A75009BC725 /* AppsSettingsTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppsSettingsTabView.swift; sourceTree = "<group>"; };
 		5CC9F0992BC5445C00AF9B81 /* Messager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Messager.swift; sourceTree = "<group>"; };
 		5CC9F09C2BC567F000AF9B81 /* ActionSettingsTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActionSettingsTabView.swift; sourceTree = "<group>"; };
+		5CA7D0C12E9B100100AABB11 /* ActionEditSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActionEditSheet.swift; sourceTree = "<group>"; };
+		5CA7D0C12E9B100100AABB13 /* IconPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IconPicker.swift; sourceTree = "<group>"; };
+		5CA7D0C12E9B100100AABB15 /* SubmenuEditSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubmenuEditSheet.swift; sourceTree = "<group>"; };
 		5CDE94A82BCADA0500B05814 /* FinderSyncExt.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = FinderSyncExt.entitlements; sourceTree = "<group>"; };
 		5CDFE3152CA3D63B00AE6C95 /* SettingsWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsWindow.swift; sourceTree = "<group>"; };
 		5CDFE3172CA3D66000AE6C95 /* Constants.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Constants.swift; sourceTree = "<group>"; };
@@ -179,6 +195,11 @@
 				5C1DA5B02BC59978004F88BC /* Info.plist */,
 				5C50D27D2BBFB1E100DF31AA /* Shared */,
 				5C119D062BBE9B9900B2D7C4 /* IClickApp.swift */,
+				5CA7D0C12E9B100100AABB21 /* AppDelegate+Open.swift */,
+				5CA7D0C12E9B100100AABB23 /* AppDelegate+Clipboard.swift */,
+				5CA7D0C12E9B100100AABB25 /* AppDelegate+Hide.swift */,
+				5CA7D0C12E9B100100AABB27 /* AppDelegate+Delete.swift */,
+				5CA7D0C12E9B100100AABB29 /* AppDelegate+FileActions.swift */,
 				5C945D052CA51B8F00DABD2C /* AppState.swift */,
 				5C119D172BBE9C8F00B2D7C4 /* MenuBarView.swift */,
 				5C119D0C2BBE9B9B00B2D7C4 /* Assets.xcassets */,
@@ -270,6 +291,9 @@
 				5C119D192BBE9D5700B2D7C4 /* SettingsView.swift */,
 				5C158AA82BC64654006EC625 /* GeneralSettingsTabView.swift */,
 				5CC9F09C2BC567F000AF9B81 /* ActionSettingsTabView.swift */,
+				5CA7D0C12E9B100100AABB11 /* ActionEditSheet.swift */,
+				5CA7D0C12E9B100100AABB13 /* IconPicker.swift */,
+				5CA7D0C12E9B100100AABB15 /* SubmenuEditSheet.swift */,
 				5C50D2592BBED0FE00DF31AA /* AboutSettingsTabView.swift */,
 				5CB470D42CEB7A75009BC725 /* AppsSettingsTabView.swift */,
 				5CB470D22CEB7A3B009BC725 /* NewFileSettingsTabView.swift */,
@@ -385,6 +409,9 @@
 				5C945D062CA51B8F00DABD2C /* AppState.swift in Sources */,
 				5C5CAB8E2E7FE631001C5D58 /* UpdaterView.swift in Sources */,
 				5CC9F09D2BC567F000AF9B81 /* ActionSettingsTabView.swift in Sources */,
+				5CA7D0C12E9B100100AABB12 /* ActionEditSheet.swift in Sources */,
+				5CA7D0C12E9B100100AABB14 /* IconPicker.swift in Sources */,
+				5CA7D0C12E9B100100AABB16 /* SubmenuEditSheet.swift in Sources */,
 				5C50D25A2BBED0FE00DF31AA /* AboutSettingsTabView.swift in Sources */,
 				5CDFE3162CA3D65000AE6C95 /* SettingsWindow.swift in Sources */,
 				5CB470D32CEB7A3B009BC725 /* NewFileSettingsTabView.swift in Sources */,
@@ -405,6 +432,11 @@
 				A10C00052E9C000100000005 /* DiagnosticLog.swift in Sources */,
 				A10C00062E9C000100000006 /* MessageDeduplicator.swift in Sources */,
 				5C119D072BBE9B9900B2D7C4 /* IClickApp.swift in Sources */,
+				5CA7D0C12E9B100100AABB22 /* AppDelegate+Open.swift in Sources */,
+				5CA7D0C12E9B100100AABB24 /* AppDelegate+Clipboard.swift in Sources */,
+				5CA7D0C12E9B100100AABB26 /* AppDelegate+Hide.swift in Sources */,
+				5CA7D0C12E9B100100AABB28 /* AppDelegate+Delete.swift in Sources */,
+				5CA7D0C12E9B100100AABB2A /* AppDelegate+FileActions.swift in Sources */,
 				5C4039F52E8F717A00AE4091 /* ModelContainer.swift in Sources */,
 				5C34BAA52D943AF100CF8128 /* Utils.swift in Sources */,
 				5CDFE3192CA3D66B00AE6C95 /* Constants.swift in Sources */,

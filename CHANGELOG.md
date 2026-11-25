@@ -67,6 +67,13 @@
 - 扩展的编译单元彻底不再引用 SwiftUI：设置页专用的 `Color` 辅助函数移到主应用
   文件，`remove(atOffsets:)`（SwiftUI 扩展）换成标准库等价写法。扩展对象里只剩
   AppKit 自身自动链接的 `SwiftUICore`。
+- 文件类型图标的来源判定统一为 `NewFile.iconSource(for:)`（图片路径 / Asset 名 /
+  SF Symbol 三选一），设置列表、编辑弹窗和 Finder 菜单共用同一套优先级。
+- `ActionSettingsTabView.swift` 766 行拆成 4 个文件（编辑弹窗、图标选择器、
+  子菜单弹窗各自独立），只是移动代码，没有改动界面与交互。
+- `AppDelegate` 从 `IClickApp.swift` 拆成 5 个扩展文件（打开 / 剪切粘贴 / 隐藏 /
+  删除 / 新建与共享），`IClickApp.swift` 从 1390 行降到 457 行；仅把跨文件会用到的
+  `logger`、`isProcessingDelete`、`isProcessingPaste` 放宽为 internal，逻辑零改动。
 
 ### Fixed
 

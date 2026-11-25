@@ -730,21 +730,24 @@ class FinderSyncExt: FIFinderSync, @unchecked Sendable {
                 let icon = getIcon(for: app.path)
                 icon.isTemplate = true
                 menuItem.image = menuSizedImage(icon)
-            } else if item.icon.contains("/") {
-                // 自定义文件路径图标，缩放至标准菜单尺寸（结果已缓存）
-                menuItem.image = fileMenuIcon(path: item.icon)
-                    ?? menuSizedImage(item.systemIcon)
-            } else if let assetImage = NSImage(named: item.icon) {
-                // Asset Catalog 图片（与设置 systemIcon 逻辑一致）
-                menuItem.image = menuSizedImage(assetImage)
             } else {
-                // SF Symbol，与设置保持一致：用户选过的图标优先，没选过按扩展名推导
-                let sfName = NewFile.resolvedSymbolName(for: item)
-                let color = NewFile.nsFileIconColor(for: item.ext)
-                if let tinted = tintedSymbol(named: sfName, color: color, size: 16) {
-                    menuItem.image = tinted
-                } else {
-                    menuItem.image = sfIcon(sfName, description: item.name)
+                // 来源判定与设置页共用 NewFile.iconSource，避免三处优先级再次漂移
+                switch NewFile.iconSource(for: item) {
+                case .path(let path):
+                    // 自定义文件路径图标，缩放至标准菜单尺寸（结果已缓存）
+                    menuItem.image = fileMenuIcon(path: path)
+                        ?? menuSizedImage(item.systemIcon)
+                case .asset(let name):
+                    if let assetImage = NSImage(named: name) {
+                        menuItem.image = menuSizedImage(assetImage)
+                    }
+                case .symbol(let sfName):
+                    let color = NewFile.nsFileIconColor(for: item.ext)
+                    if let tinted = tintedSymbol(named: sfName, color: color, size: 16) {
+                        menuItem.image = tinted
+                    } else {
+                        menuItem.image = sfIcon(sfName, description: item.name)
+                    }
                 }
             }
 

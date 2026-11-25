@@ -307,6 +307,15 @@ struct NewFile: RCBase {
     }
 }
 
+enum FileTypeIconSource: Equatable {
+    /// 自定义图片文件路径
+    case path(String)
+    /// Asset catalog 里的图片名
+    case asset(String)
+    /// SF Symbol 名称（已包含按扩展名的回退）
+    case symbol(String)
+}
+
 extension NewFile {
     nonisolated(unsafe) static var all: [NewFile] = [.txt, .md, .json, .docx, .pptx, .xlsx]
 
@@ -317,6 +326,17 @@ extension NewFile {
     static let docx = NewFile(ext: ".docx", name: "DOCX", idx: 3, icon: "icon-file-docx", id: "newfile.docx", defaultName: "未命名")
     static let pptx = NewFile(ext: ".pptx", name: "PPTX", idx: 4, icon: "icon-file-pptx", id: "newfile.pptx", defaultName: "未命名")
     static let xlsx = NewFile(ext: ".xlsx", name: "XLSX", idx: 5, icon: "icon-file-xlsx", id: "newfile.xlsx", defaultName: "未命名")
+
+    /// 图标来源判定（设置列表、编辑弹窗、Finder 菜单共用同一套优先级：
+    /// 自定义图片路径 → Asset 名称 → SF Symbol）。
+    /// 只决定「用哪种方式渲染」，具体渲染由调用方按各自环境完成 ——
+    /// 之前三处各写一份分支，正是「自定义图标不生效」那类漂移的来源。
+    static func iconSource(for item: NewFile) -> FileTypeIconSource {
+        let icon = item.icon
+        if icon.contains("/") { return .path(icon) }
+        if !icon.isEmpty, NSImage(named: icon) != nil { return .asset(icon) }
+        return .symbol(resolvedSymbolName(for: item))
+    }
 
     /// 实际渲染用的 SF Symbol：优先用户选择的图标（确实是有效 SF Symbol 时），
     /// 否则回退到按扩展名推导的默认符号。

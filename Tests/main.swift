@@ -6,6 +6,7 @@
 //  用 scripts/smoke-test.sh 编译运行；CI 里也会跑。
 //
 
+import AppKit
 import Foundation
 import Darwin
 
@@ -136,6 +137,20 @@ check(NewFile.resolvedSymbolName(for: fileType(ext: ".txt", icon: "")) == "doc.t
       "图标解析: 空图标回退")
 check(NewFile.resolvedSymbolName(for: fileType(ext: ".txt", icon: "/tmp/icon.png")) == "doc.text",
       "图标解析: 图片路径回退")
+check(NewFile.iconSource(for: fileType(ext: ".txt", icon: "/tmp/icon.png")) == .path("/tmp/icon.png"),
+      "图标来源: 图片路径")
+// 冒烟测试是独立 CLI，没有 App 的 Assets.car：asset 名在这里不可用，
+// 此时应回退到扩展名默认符号；在真实 App 里则会走 .asset 分支。
+if NSImage(named: "icon-file-md") != nil {
+    check(NewFile.iconSource(for: fileType(ext: ".md", icon: "icon-file-md")) == .asset("icon-file-md"),
+          "图标来源: Asset 名称")
+} else {
+    check(NewFile.iconSource(for: fileType(ext: ".md", icon: "icon-file-md"))
+          == .symbol(NewFile.sfSymbolName(for: ".md")),
+          "图标来源: Asset 不可用时回退（CLI 无 Assets.car）")
+}
+check(NewFile.iconSource(for: fileType(ext: ".txt", icon: "star.fill")) == .symbol("star.fill"),
+      "图标来源: 自定义 SF Symbol")
 
 // MARK: - 更新包资产选择
 
