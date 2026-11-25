@@ -76,17 +76,17 @@ do {
 check(Utils.isProtectedFolder("/System"), "受保护: /System")
 check(Utils.isProtectedFolder("/system"), "受保护: 大小写不敏感")
 check(Utils.isProtectedFolder("/System/../System"), "受保护: 规范化 ..")
-check(Utils.isProtectedFolder("/Users/anwen/Desktop"), "受保护: ~/Desktop")
+check(Utils.isProtectedFolder(Utils.getRealHomeDir() + "/Desktop"), "受保护: ~/Desktop")
 check(Utils.isProtectedFolder("~/Desktop"), "受保护: 字面 ~/Desktop")
 check(Utils.isProtectedFolder(Utils.getRealHomeDir()), "受保护: 家目录本身")
 check(Utils.isProtectedFolder("~/"), "受保护: 字面家目录")
 check(Utils.isProtectedFolder(""), "空路径按危险处理")
 check(!Utils.isProtectedFolder("/tmp"), "不受保护: /tmp")
-check(!Utils.isProtectedFolder("/Users/anwen/Documents"), "不受保护: ~/Documents")
+check(!Utils.isProtectedFolder(Utils.getRealHomeDir() + "/Documents"), "不受保护: ~/Documents")
 
 check(Utils.isSystemFolder("/Applications"), "系统目录: /Applications")
 check(Utils.isSystemFolder("/Library"), "系统目录: /Library")
-check(!Utils.isSystemFolder("/Users/anwen/Desktop"), "桌面不是系统目录（允许整目录隐藏）")
+check(!Utils.isSystemFolder(Utils.getRealHomeDir() + "/Desktop"), "桌面不是系统目录（允许整目录隐藏）")
 
 // MARK: - 模型编解码往返
 
