@@ -35,6 +35,9 @@ public enum Constants {
     /// 所以后者用的是更窄的 systemDirs（见 Utils.isSystemFolder）。
     /// 写成拼接而非手抄两份，是为了结构上保证 systemDirs 恒为 protectedDirs 的子集。
     static let protectedDirs = [
+        // 家目录本身：删除家目录没有任何正当理由，且 Finder 的 AppleScript 删除
+        // 回退路径真的会把它送进废纸篓。子目录不受影响（isFolder 只做精确匹配）。
+        HomedirPath + "/",
         HomedirPath + "/Desktop/",
         HomedirPath + "/Desktop/danger/",
         HomedirPath + "/Applications/"
